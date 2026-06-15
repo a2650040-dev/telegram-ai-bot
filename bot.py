@@ -221,7 +221,8 @@ async def image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         import random
         encoded = urllib.parse.quote(prompt, safe='')
         seed = random.randint(1, 99999)
-        url = f"https://pollinations.ai/p/{encoded}?seed={seed}&nologo=true&nofeed=true"
+        pk_key = os.getenv('POLLINATIONS_KEY', '')
+        url = f"https://gen.pollinations.ai/image/{encoded}?seed={seed}&nologo=true&key={pk_key}"
 
         logger.info(f"Запрос к Pollinations: {url}")
 
