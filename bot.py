@@ -226,7 +226,7 @@ async def image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         logger.info(f"Запрос к Pollinations: {url}")
 
-        response = requests.get(url, timeout=60)
+        response = requests.get(url, timeout=120)
 
         if response.status_code == 200:
             await update.message.reply_photo(
