@@ -213,89 +213,35 @@ async def image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prompt = f"{full_text}, {style_suffix}" if style_suffix else full_text
 
     msg = await update.message.reply_text(
-        "Генерирую изображение, подожди ~60 секунд..."
+        "Генерирую изображение, подожди ~20 секунд..."
     )
 
     try:
-        api_key = os.getenv('HORDE_API_KEY', '0000000000')
+        import urllib.parse
+        import random
+        encoded = urllib.parse.quote(prompt, safe='')
+        seed = random.randint(1, 99999)
+        url = f"https://pollinations.ai/p/{encoded}?seed={seed}&nologo=true&nofeed=true"
 
-        headers = {
-            'apikey': api_key,
-            'Content-Type': 'application/json'
-        }
+        logger.info(f"Запрос к Pollinations: {url}")
 
-        submit = requests.post(
-            'https://stablehorde.net/api/v2/generate/async',
-            headers=headers,
-            json={
-                'prompt': prompt,
-                'params': {
-                    'width': 512,
-                    'height': 512,
-                    'steps': 20,
-                },
-                'models': ['stable_diffusion']
-            },
-            timeout=30
-        )
+        response = requests.get(url, timeout=60)
 
-        if submit.status_code != 202:
+        if response.status_code == 200:
+            await update.message.reply_photo(
+                photo=io.BytesIO(response.content),
+                caption=full_text
+            )
+            await msg.delete()
+        else:
             await msg.edit_text(
-                f"Ошибка отправки задачи: {submit.status_code}"
-            )
-            return
-
-        job_id = submit.json()['id']
-
-        logger.info(f"Horde job ID: {job_id}")
-
-        import time
-
-        for attempt in range(24):
-            time.sleep(10)
-
-            check = requests.get(
-                f'https://stablehorde.net/api/v2/generate/check/{job_id}',
-                headers=headers,
-                timeout=60
+                f"Ошибка генерации: {response.status_code}. Попробуй ещё раз."
             )
 
-            data = check.json()
-
-            if data.get('done'):
-                break
-
-        result = requests.get(
-            f'https://stablehorde.net/api/v2/generate/status/{job_id}',
-            headers=headers,
-            timeout=60
-        )
-
-        generations = result.json().get('generations', [])
-
-        if not generations:
-            await msg.edit_text(
-                "Изображение не сгенерировалось. Попробуй ещё раз."
-            )
-            return
-
-        image_url = generations[0]['img']
-
-        img_response = requests.get(
-            image_url,
-            timeout=60
-        )
-
-        await update.message.reply_photo(
-            photo=io.BytesIO(img_response.content),
-            caption=full_text
-        )
-
-        await msg.delete()
-
+    except requests.Timeout:
+        await msg.edit_text("Таймаут. Попробуй ещё раз.")
     except Exception as e:
         logger.error(f"Image error: {e}")
-
         await msg.edit_text(f"Ошибка: {str(e)}")
 
 
