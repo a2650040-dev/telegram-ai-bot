@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import io
+import sys
 import logging
 import requests
 from dotenv import load_dotenv
@@ -15,13 +16,14 @@ load_dotenv()
 
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    stream=sys.stdout
 )
 logger = logging.getLogger(__name__)
 
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
 
-# Доступные модели
+# Available models
 AVAILABLE_MODELS = {
     'flash25': 'gemini-2.5-flash',
     'flash25lite': 'gemini-2.5-flash-lite',
@@ -29,7 +31,7 @@ AVAILABLE_MODELS = {
     'flash20lite': 'gemini-2.0-flash-lite',
 }
 
-# Модель по умолчанию
+# Default model
 DEFAULT_MODEL = 'flash25'
 
 user_histories = {}
@@ -52,35 +54,35 @@ def get_user_model(user_id):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Я AI-ассистент на базе Gemini.\n\n"
-        "Просто напиши - отвечу\n"
-        "/image [описание] - сгенерирую картинку\n"
-        "Стили: --photo --anime --art --dark --minimal\n"
-        "/model - показать текущую модель\n"
-        "/models - список моделей\n"
-        "/setmodel [название] - сменить модель\n"
-        "/clear - очистить историю\n"
-        "/help - все команды"
+        "Hi! I'm an AI assistant powered by Gemini.\n\n"
+        "Just write something - I'll reply\n"
+        "/image [description] - generate an image\n"
+        "Styles: --photo --anime --art --dark --minimal\n"
+        "/model - show current model\n"
+        "/models - list available models\n"
+        "/setmodel [name] - switch model\n"
+        "/clear - clear history\n"
+        "/help - all commands"
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Команды:\n\n"
-        "Любой текст - диалог с Gemini AI\n\n"
-        "Модели:\n"
-        "/models - список моделей\n"
-        "/model - текущая модель\n"
+        "Commands:\n\n"
+        "Any text - chat with Gemini AI\n\n"
+        "Models:\n"
+        "/models - list available models\n"
+        "/model - current model\n"
         "/setmodel flash25\n"
         "/setmodel flash25lite\n"
         "/setmodel flash20\n"
         "/setmodel flash20lite\n\n"
-        "Генерация изображений:\n"
-        "/image кот на крыше --anime\n"
-        "/image горный закат --photo\n"
-        "/image абстракция --art\n\n"
-        "/clear - очистить историю\n"
-        "/help - эта справка"
+        "Image generation:\n"
+        "/image cat on a roof --anime\n"
+        "/image mountain sunset --photo\n"
+        "/image abstract shapes --art\n\n"
+        "/clear - clear history\n"
+        "/help - this help message"
     )
 
 
@@ -91,12 +93,12 @@ async def models(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     text = (
-        "Доступные модели:\n\n"
+        "Available models:\n\n"
         f"• flash25 → {AVAILABLE_MODELS['flash25']}\n"
         f"• flash25lite → {AVAILABLE_MODELS['flash25lite']}\n"
         f"• flash20 → {AVAILABLE_MODELS['flash20']}\n"
         f"• flash20lite → {AVAILABLE_MODELS['flash20lite']}\n\n"
-        f"Текущая модель: {current_model}"
+        f"Current model: {current_model}"
     )
 
     await update.message.reply_text(text)
@@ -107,7 +109,7 @@ async def current_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
     model_key = user_models.get(user_id, DEFAULT_MODEL)
 
     await update.message.reply_text(
-        f"Текущая модель:\n"
+        f"Current model:\n"
         f"{AVAILABLE_MODELS[model_key]}"
     )
 
@@ -117,10 +119,10 @@ async def set_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not context.args:
         await update.message.reply_text(
-            "Укажи модель.\n\n"
-            "Пример:\n"
+            "Specify a model.\n\n"
+            "Example:\n"
             "/setmodel flash25\n\n"
-            "Список моделей:\n"
+            "Available models:\n"
             + '\n'.join(AVAILABLE_MODELS.keys())
         )
         return
@@ -129,8 +131,8 @@ async def set_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if selected not in AVAILABLE_MODELS:
         await update.message.reply_text(
-            "Неизвестная модель.\n\n"
-            "Доступные модели:\n"
+            "Unknown model.\n\n"
+            "Available models:\n"
             + '\n'.join(AVAILABLE_MODELS.keys())
         )
         return
@@ -138,7 +140,7 @@ async def set_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_models[user_id] = selected
 
     await update.message.reply_text(
-        f"Модель переключена на:\n"
+        f"Model switched to:\n"
         f"{AVAILABLE_MODELS[selected]}"
     )
 
@@ -147,7 +149,7 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     user_histories[user_id] = []
 
-    await update.message.reply_text("История очищена!")
+    await update.message.reply_text("History cleared!")
 
 
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -177,7 +179,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         full_response = (
             f"{response.text}\n\n"
-            f"🤖 Модель: {AVAILABLE_MODELS[current]}"
+            f"🤖 Model: {AVAILABLE_MODELS[current]}"
         )
 
         MAX_LENGTH = 4000
@@ -190,14 +192,14 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Chat error: {e}")
 
         await update.message.reply_text(
-            "Ошибка при обращении к Gemini. Попробуй ещё раз."
+            "Error reaching Gemini. Please try again."
         )
 
 
 async def image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
-            "Укажи описание.\nПример: /image sunset over mountains"
+            "Specify a description.\nExample: /image sunset over mountains"
         )
         return
 
@@ -213,7 +215,7 @@ async def image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prompt = f"{full_text}, {style_suffix}" if style_suffix else full_text
 
     msg = await update.message.reply_text(
-        "Генерирую изображение, подожди ~20 секунд..."
+        "Generating image, please wait ~20 seconds..."
     )
 
     try:
@@ -224,7 +226,7 @@ async def image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pk_key = os.getenv('POLLINATIONS_KEY', '')
         url = f"https://gen.pollinations.ai/image/{encoded}?seed={seed}&nologo=true&key={pk_key}"
 
-        logger.info(f"Запрос к Pollinations: {url}")
+        logger.info(f"Pollinations request: {url}")
 
         response = requests.get(url, timeout=120)
 
@@ -236,14 +238,14 @@ async def image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.delete()
         else:
             await msg.edit_text(
-                f"Ошибка генерации: {response.status_code}. Попробуй ещё раз."
+                f"Generation error: {response.status_code}. Please try again."
             )
 
     except requests.Timeout:
-        await msg.edit_text("Таймаут. Попробуй ещё раз.")
+        await msg.edit_text("Timed out. Please try again.")
     except Exception as e:
         logger.error(f"Image error: {e}")
-        await msg.edit_text(f"Ошибка: {str(e)}")
+        await msg.edit_text(f"Error: {str(e)}")
 
 
 def main():
@@ -251,7 +253,7 @@ def main():
 
     if not token:
         raise ValueError(
-            "TELEGRAM_TOKEN не найден в .env файле"
+            "TELEGRAM_TOKEN not found in .env file"
         )
 
     app = Application.builder().token(token).build()
@@ -260,15 +262,15 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("clear", clear))
 
-    # Модели
+    # Models
     app.add_handler(CommandHandler("models", models))
     app.add_handler(CommandHandler("model", current_model))
     app.add_handler(CommandHandler("setmodel", set_model))
 
-    # Картинки
+    # Images
     app.add_handler(CommandHandler("image", image))
 
-    # Чат
+    # Chat
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND,
         chat
