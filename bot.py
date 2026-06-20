@@ -6,7 +6,7 @@ import sys
 import logging
 import requests
 from dotenv import load_dotenv
-import google.generativeai as genai
+from google import genai
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
+gemini_client = genai.Client(api_key=os.getenv('GEMINI_API_KEY'))
 
 ALLOWED_USERS_FILE = 'allowed_users.txt'
 
@@ -101,10 +101,9 @@ STYLES = {
 }
 
 
-def get_user_model(user_id):
+def get_user_model_name(user_id):
     model_key = user_models.get(user_id, DEFAULT_MODEL)
-    model_name = AVAILABLE_MODELS[model_key]
-    return genai.GenerativeModel(model_name)
+    return AVAILABLE_MODELS[model_key]
 
 
 # Characters that MarkdownV2 requires to be escaped with a backslash.
@@ -306,15 +305,16 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
-        gemini = get_user_model(user_id)
+        model_name = get_user_model_name(user_id)
 
-        session = gemini.start_chat(
+        session = gemini_client.chats.create(
+            model=model_name,
             history=user_histories[user_id]
         )
 
         response = session.send_message(user_message)
 
-        user_histories[user_id] = list(session.history)[-20:]
+        user_histories[user_id] = session.get_history()[-20:]
 
         current = user_models.get(user_id, DEFAULT_MODEL)
 
