@@ -23,6 +23,59 @@ logger = logging.getLogger(__name__)
 
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
 
+ALLOWED_USERS_FILE = 'allowed_users.txt'
+
+
+def load_allowed_users():
+    """Reads allowed_users.txt and returns a set of allowed Telegram user IDs.
+    One ID per line. Lines starting with # or empty lines are ignored.
+    If the file is missing, the bot stays open to everyone (logs a warning)."""
+    if not os.path.exists(ALLOWED_USERS_FILE):
+        logger.warning(
+            f"{ALLOWED_USERS_FILE} not found - whitelist is DISABLED, "
+            "bot is open to everyone."
+        )
+        return None
+
+    allowed = set()
+    with open(ALLOWED_USERS_FILE, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            try:
+                allowed.add(int(line))
+            except ValueError:
+                logger.warning(f"Skipping invalid line in {ALLOWED_USERS_FILE}: {line!r}")
+
+    logger.info(f"Loaded {len(allowed)} allowed user ID(s) from {ALLOWED_USERS_FILE}")
+    return allowed
+
+
+ALLOWED_USERS = load_allowed_users()
+
+
+def restricted(handler):
+    """Decorator: blocks the handler for any user_id not in ALLOWED_USERS.
+    If ALLOWED_USERS is None (file missing), the whitelist is skipped entirely."""
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if ALLOWED_USERS is None:
+            return await handler(update, context)
+
+        user_id = update.effective_user.id
+
+        if user_id not in ALLOWED_USERS:
+            logger.warning(f"Blocked access attempt from user_id={user_id}")
+            await update.message.reply_text(
+                "Sorry, this bot is private and only available to approved users."
+            )
+            return
+
+        return await handler(update, context)
+
+    return wrapper
+
+
 # Available models
 AVAILABLE_MODELS = {
     'flash25': 'gemini-2.5-flash',
@@ -52,6 +105,7 @@ def get_user_model(user_id):
     return genai.GenerativeModel(model_name)
 
 
+@restricted
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Hi! I'm an AI assistant powered by Gemini.\n\n"
@@ -66,6 +120,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+@restricted
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Commands:\n\n"
@@ -86,6 +141,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+@restricted
 async def models(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_model = user_models.get(
         update.message.from_user.id,
@@ -104,6 +160,7 @@ async def models(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
+@restricted
 async def current_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     model_key = user_models.get(user_id, DEFAULT_MODEL)
@@ -114,6 +171,7 @@ async def current_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+@restricted
 async def set_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
 
@@ -145,6 +203,7 @@ async def set_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+@restricted
 async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     user_histories[user_id] = []
@@ -152,6 +211,7 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("History cleared!")
 
 
+@restricted
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     user_message = update.message.text
@@ -196,6 +256,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+@restricted
 async def image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(

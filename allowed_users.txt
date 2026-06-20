@@ -1,0 +1,9 @@
+# One Telegram user_id per line.
+# Lines starting with # are comments and are ignored.
+# To find your own user_id, message @userinfobot on Telegram.
+#
+# Example:
+# 123456789
+# 987654321
+
+8634926425
