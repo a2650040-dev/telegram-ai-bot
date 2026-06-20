@@ -112,58 +112,67 @@ def get_user_model(user_id):
 _MDV2_SPECIAL_CHARS = r'_[]()~`>#+-=|{}.!'
 
 
+def _escape_plain(text: str) -> str:
+    """Escapes all MarkdownV2 special characters in plain (non-formatted) text."""
+    return re.sub(f'([{re.escape(_MDV2_SPECIAL_CHARS)}])', r'\\\1', text)
+
+
 def gemini_markdown_to_telegram(text: str) -> str:
-    """Converts Gemini's plain-Markdown output (**bold**, *italic*, `code`)
-    into Telegram's MarkdownV2 format, escaping everything that needs
-    escaping while leaving the actual bold/italic/code markers intact.
+    """Converts Gemini's Markdown (**bold**, *italic*, `code`, ```code blocks```)
+    into Telegram's MarkdownV2 format.
 
-    Strategy: split the text into "formatting tokens" (**, *, `, ```...```)
-    and "plain text" chunks. Escape only the plain text chunks, then
-    reassemble. This avoids accidentally escaping the markers themselves.
+    Uses a small recursive scanner rather than a single regex pass, because
+    Gemini sometimes nests markers (e.g. "*italic with **bold** inside*"),
+    which a flat regex can't parse correctly and ends up producing unbalanced
+    output that Telegram then refuses to render.
     """
-    # Token pattern: code blocks, inline code, bold, italic - in this order
-    # so greedy bold (**) is matched before single-star italic (*).
-    token_pattern = re.compile(
-        r'(```.*?```|`[^`]*?`|\*\*.*?\*\*|\*[^*]*?\*|_[^_]*?_)',
-        re.DOTALL
-    )
+    # Code blocks/inline code are stashed first so their contents are never
+    # touched by the bold/italic scanner or the plain-text escaper below.
+    placeholders = []
 
-    parts = token_pattern.split(text)
-    result = []
+    def stash_code(match):
+        placeholders.append(match.group(0))
+        return f'\x00{len(placeholders) - 1}\x00'
 
-    for part in parts:
-        if not part:
-            continue
+    text = re.sub(r'```.*?```', stash_code, text, flags=re.DOTALL)
+    text = re.sub(r'`[^`\x00]*?`', stash_code, text)
 
-        if token_pattern.fullmatch(part):
-            # It's a formatting token - keep markers, escape only the inner content
-            if part.startswith('```'):
-                inner = part[3:-3]
-                result.append('```' + inner + '```')
-            elif part.startswith('`'):
-                inner = part[1:-1]
-                result.append('`' + inner + '`')
-            elif part.startswith('**'):
-                inner = part[2:-2]
-                escaped_inner = re.sub(
-                    f'([{re.escape(_MDV2_SPECIAL_CHARS)}])', r'\\\1', inner
-                )
-                result.append('*' + escaped_inner + '*')  # MarkdownV2 bold = single *
-            elif part.startswith('*') or part.startswith('_'):
-                marker = part[0]
-                inner = part[1:-1]
-                escaped_inner = re.sub(
-                    f'([{re.escape(_MDV2_SPECIAL_CHARS)}])', r'\\\1', inner
-                )
-                result.append('_' + escaped_inner + '_')  # MarkdownV2 italic = single _
-        else:
-            # Plain text - escape all special characters
-            escaped = re.sub(
-                f'([{re.escape(_MDV2_SPECIAL_CHARS)}])', r'\\\1', part
-            )
-            result.append(escaped)
+    i = 0
+    n = len(text)
 
-    return ''.join(result)
+    def parse(stop_double, stop_single):
+        nonlocal i
+        buf = []
+        while i < n:
+            if text[i:i + 2] == '**':
+                if stop_double:
+                    return ''.join(buf)
+                i += 2
+                inner = parse(stop_double=True, stop_single=False)
+                if text[i:i + 2] == '**':
+                    i += 2
+                buf.append('*' + inner + '*')  # MarkdownV2 bold = single *
+                continue
+            if text[i] == '*':
+                if stop_single:
+                    return ''.join(buf)
+                i += 1
+                inner = parse(stop_double=False, stop_single=True)
+                if i < n and text[i] == '*':
+                    i += 1
+                buf.append('_' + inner + '_')  # MarkdownV2 italic = single _
+                continue
+            if text[i] == '\x00':
+                end = text.index('\x00', i + 1)
+                idx = int(text[i + 1:end])
+                buf.append(placeholders[idx])
+                i = end + 1
+                continue
+            buf.append(_escape_plain(text[i]))
+            i += 1
+        return ''.join(buf)
+
+    return parse(stop_double=False, stop_single=False)
 
 
 async def send_markdown_safe(message, text: str):
