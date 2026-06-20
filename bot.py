@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 import os
 import io
+import re
 import sys
 import logging
 import requests
 from dotenv import load_dotenv
 import google.generativeai as genai
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application, CommandHandler,
     MessageHandler, filters, ContextTypes
@@ -103,6 +105,76 @@ def get_user_model(user_id):
     model_key = user_models.get(user_id, DEFAULT_MODEL)
     model_name = AVAILABLE_MODELS[model_key]
     return genai.GenerativeModel(model_name)
+
+
+# Characters that MarkdownV2 requires to be escaped with a backslash.
+# See: https://core.telegram.org/bots/api#markdownv2-style
+_MDV2_SPECIAL_CHARS = r'_[]()~`>#+-=|{}.!'
+
+
+def gemini_markdown_to_telegram(text: str) -> str:
+    """Converts Gemini's plain-Markdown output (**bold**, *italic*, `code`)
+    into Telegram's MarkdownV2 format, escaping everything that needs
+    escaping while leaving the actual bold/italic/code markers intact.
+
+    Strategy: split the text into "formatting tokens" (**, *, `, ```...```)
+    and "plain text" chunks. Escape only the plain text chunks, then
+    reassemble. This avoids accidentally escaping the markers themselves.
+    """
+    # Token pattern: code blocks, inline code, bold, italic - in this order
+    # so greedy bold (**) is matched before single-star italic (*).
+    token_pattern = re.compile(
+        r'(```.*?```|`[^`]*?`|\*\*.*?\*\*|\*[^*]*?\*|_[^_]*?_)',
+        re.DOTALL
+    )
+
+    parts = token_pattern.split(text)
+    result = []
+
+    for part in parts:
+        if not part:
+            continue
+
+        if token_pattern.fullmatch(part):
+            # It's a formatting token - keep markers, escape only the inner content
+            if part.startswith('```'):
+                inner = part[3:-3]
+                result.append('```' + inner + '```')
+            elif part.startswith('`'):
+                inner = part[1:-1]
+                result.append('`' + inner + '`')
+            elif part.startswith('**'):
+                inner = part[2:-2]
+                escaped_inner = re.sub(
+                    f'([{re.escape(_MDV2_SPECIAL_CHARS)}])', r'\\\1', inner
+                )
+                result.append('*' + escaped_inner + '*')  # MarkdownV2 bold = single *
+            elif part.startswith('*') or part.startswith('_'):
+                marker = part[0]
+                inner = part[1:-1]
+                escaped_inner = re.sub(
+                    f'([{re.escape(_MDV2_SPECIAL_CHARS)}])', r'\\\1', inner
+                )
+                result.append('_' + escaped_inner + '_')  # MarkdownV2 italic = single _
+        else:
+            # Plain text - escape all special characters
+            escaped = re.sub(
+                f'([{re.escape(_MDV2_SPECIAL_CHARS)}])', r'\\\1', part
+            )
+            result.append(escaped)
+
+    return ''.join(result)
+
+
+async def send_markdown_safe(message, text: str):
+    """Tries to send text formatted as MarkdownV2. If parsing fails for any
+    reason, falls back to plain text so the bot never crashes on a reply."""
+    try:
+        converted = gemini_markdown_to_telegram(text)
+        await message.reply_text(converted, parse_mode=ParseMode.MARKDOWN_V2)
+    except Exception as e:
+        logger.warning(f"MarkdownV2 send failed, falling back to plain text: {e}")
+        await message.reply_text(text)
 
 
 @restricted
@@ -246,7 +318,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         for i in range(0, len(full_response), MAX_LENGTH):
             chunk = full_response[i:i + MAX_LENGTH]
-            await update.message.reply_text(chunk)
+            await send_markdown_safe(update.message, chunk)
 
     except Exception as e:
         logger.error(f"Chat error: {e}")
