@@ -134,11 +134,11 @@ def get_user_model_name(user_id):
 
 
 STYLES = {
-    'photo':   ('📷 Фото', 'photography, realistic, 8k, natural lighting'),
-    'anime':   ('🎨 Аниме', 'anime style, vibrant colors, studio quality'),
-    'art':     ('🖌 Арт', 'digital art, artstation, concept art, detailed'),
-    'dark':    ('🌑 Тёмный', 'dark fantasy, moody, dramatic lighting'),
-    'minimal': ('⚪ Минимализм', 'minimalist, clean, simple, white background'),
+    'photo':   ('📷 Photo', 'photography, realistic, 8k, natural lighting'),
+    'anime':   ('🎨 Anime', 'anime style, vibrant colors, studio quality'),
+    'art':     ('🖌 Art', 'digital art, artstation, concept art, detailed'),
+    'dark':    ('🌑 Dark', 'dark fantasy, moody, dramatic lighting'),
+    'minimal': ('⚪ Minimal', 'minimalist, clean, simple, white background'),
 }
 # Kept for users who still type the old --flags with /image
 LEGACY_STYLE_FLAGS = {
@@ -176,30 +176,30 @@ def _prune(timestamps, window):
         timestamps.pop(0)
 
 
-def check_chat_rate_limit(user_id):
+def check_chat_rate_limit(user_id) -> str | None:
     """Returns an error message if the user is rate-limited, else None."""
     now = time()
     ts = chat_timestamps[user_id]
     _prune(ts, DAY)
     if sum(1 for t in ts if t > now - HOUR) >= CHAT_HOUR_LIMIT:
-        return "Слишком много сообщений за последний час. Попробуйте чуть позже 🙂"
+        return "Too many messages in the last hour. Please try again a bit later 🙂"
     if len(ts) >= CHAT_DAY_LIMIT:
-        return "Дневной лимит сообщений исчерпан. Возвращайтесь завтра!"
+        return "Daily message limit reached. Come back tomorrow!"
     return None
 
 
-def check_image_rate_limit(user_id):
+def check_image_rate_limit(user_id) -> str | None:
     ts = image_timestamps[user_id]
     _prune(ts, DAY)
     if len(ts) >= IMAGE_DAY_LIMIT:
-        return "Дневной лимит генераций изображений исчерпан. Попробуйте завтра!"
+        return "Daily image generation limit reached. Try again tomorrow!"
     return None
 
 
-def check_global_rate_limit():
+def check_global_rate_limit() -> str | None:
     _prune(global_timestamps, DAY)
     if len(global_timestamps) >= GLOBAL_DAY_LIMIT:
-        return "Бот сегодня уже очень много поработал и достиг общего дневного лимита. Попробуйте завтра!"
+        return "The bot has hit its overall daily limit for today. Please try again tomorrow!"
     return None
 
 
@@ -282,7 +282,7 @@ def gemini_markdown_to_telegram(text: str) -> str:
 
 
 def tts_button_markup():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔊 Озвучить", callback_data="tts:read")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔊 Read aloud", callback_data="tts:read")]])
 
 
 async def send_markdown_safe(message, text: str, reply_markup=None):
@@ -333,19 +333,19 @@ def main_menu_markup():
     keyboard = [
         [InlineKeyboardButton("ℹ️ Help", callback_data="nav:help")],
         [
-            InlineKeyboardButton("🤖 Модели", callback_data="nav:models"),
-            InlineKeyboardButton("🎙 Голос", callback_data="nav:voice"),
+            InlineKeyboardButton("🤖 Models", callback_data="nav:models"),
+            InlineKeyboardButton("🎙 Voice", callback_data="nav:voice"),
         ],
         [
-            InlineKeyboardButton("🖼 Картинки", callback_data="nav:image"),
-            InlineKeyboardButton("🧹 Очистить историю", callback_data="nav:clear"),
+            InlineKeyboardButton("🖼 Images", callback_data="nav:image"),
+            InlineKeyboardButton("🧹 Clear history", callback_data="nav:clear"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
 
 
 def back_button():
-    return [InlineKeyboardButton("⬅️ Назад", callback_data="nav:main")]
+    return [InlineKeyboardButton("⬅️ Back", callback_data="nav:main")]
 
 
 def models_menu_markup(user_id):
@@ -362,10 +362,10 @@ def voice_menu_markup(user_id):
     mode = user_voice_mode.get(user_id, 'text')
     rows = [
         [InlineKeyboardButton(
-            ("✅ " if mode == 'text' else "") + "🔤 Голосовые → текстовый ответ",
+            ("✅ " if mode == 'text' else "") + "🔤 Voice messages → text reply",
             callback_data="voice:text")],
         [InlineKeyboardButton(
-            ("✅ " if mode == 'voice' else "") + "🎙 Голосовые → голосовой ответ",
+            ("✅ " if mode == 'voice' else "") + "🎙 Voice messages → voice reply",
             callback_data="voice:voice")],
         back_button(),
     ]
@@ -387,22 +387,39 @@ def image_menu_markup():
 
 
 HELP_TEXT = (
-    "Команды:\n\n"
-    "Просто напишите текст - отвечу через Gemini AI\n"
-    "Пришлите голосовое - отвечу текстом или голосом (настраивается в /menu → Голос)\n\n"
-    "/menu - главное меню с кнопками\n"
-    "/models - список доступных моделей\n"
-    "/model - текущая модель\n"
-    "/setmodel <name> - сменить модель текстом\n"
-    "/image <описание> - сгенерировать картинку (можно добавить --anime --art --dark --minimal --photo)\n"
-    "/clear - очистить историю диалога\n"
-    "/help - эта справка"
+    "Commands:\n\n"
+    "Just type a message - I'll reply via Gemini AI\n"
+    "Send a voice message - I'll reply with text or voice (configurable in /menu → Voice)\n\n"
+    "/menu - main menu with buttons\n"
+    "/models - list available models\n"
+    "/model - current model\n"
+    "/setmodel <name> - switch model by typing\n"
+    "/image <description> - generate an image (add --anime --art --dark --minimal --photo)\n"
+    "/clear - clear conversation history\n"
+    "/help - this message"
 )
 
 START_TEXT = (
-    "Привет! Я AI-ассистент на базе Gemini.\n\n"
-    "Нажмите /menu, чтобы открыть меню с кнопками, или сразу напишите что-нибудь - я отвечу."
+    "Hi! I'm an AI assistant powered by Gemini.\n\n"
+    "Tap /menu to open the button menu, or just type something and I'll reply."
 )
+
+BOT_COMMANDS = [
+    ("start", "Start the bot"),
+    ("menu", "Open the main menu"),
+    ("help", "Show help"),
+    ("models", "List available models"),
+    ("model", "Show current model"),
+    ("setmodel", "Switch model by name"),
+    ("image", "Generate an image"),
+    ("clear", "Clear conversation history"),
+]
+
+
+async def post_init(app: Application):
+    """Registers the command list so Telegram shows the native Menu button."""
+    from telegram import BotCommand
+    await app.bot.set_my_commands([BotCommand(cmd, desc) for cmd, desc in BOT_COMMANDS])
 
 
 # ── Command handlers ──────────────────────────────────────────────────────
@@ -414,7 +431,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @restricted
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Главное меню:", reply_markup=main_menu_markup())
+    await update.message.reply_text("Main menu:", reply_markup=main_menu_markup())
 
 
 @restricted
@@ -426,10 +443,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def models(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     current = get_user_model_key(user_id)
-    lines = ["Доступные модели:\n"]
+    lines = ["Available models:\n"]
     for key, (model_id, label) in available_models_for(user_id).items():
-        marker = " (текущая)" if key == current else ""
-        lines.append(f"• {key} → {model_id}{marker}")
+        marker = " (current)" if key == current else ""
+        lines.append(f"• {key} -> {model_id}{marker}")
     await update.message.reply_text('\n'.join(lines))
 
 
@@ -437,17 +454,17 @@ async def models(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def current_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     key = get_user_model_key(user_id)
-    await update.message.reply_text(f"Текущая модель:\n{ALL_MODELS[key][0]}")
+    await update.message.reply_text(f"Current model:\n{ALL_MODELS[key][0]}")
 
 
-async def _apply_model_choice(user_id, selected_key):
+async def _apply_model_choice(user_id, selected_key) -> str:
     """Shared validation used by both /setmodel and the button menu."""
     if selected_key not in ALL_MODELS:
-        return "Неизвестная модель."
+        return "Unknown model."
     if selected_key in TRUSTED_MODELS and not is_trusted(user_id):
-        return "Эта модель доступна только доверенным пользователям.\nПопробуйте flash25lite - она бесплатна и без ограничений."
+        return "This model is only available to trusted users.\nTry flash25lite - it's free and unrestricted."
     user_models[user_id] = selected_key
-    return f"Модель переключена на:\n{ALL_MODELS[selected_key][0]}"
+    return f"Model switched to:\n{ALL_MODELS[selected_key][0]}"
 
 
 @restricted
@@ -455,7 +472,7 @@ async def set_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if not context.args:
         available = '\n'.join(available_models_for(user_id).keys())
-        await update.message.reply_text(f"Укажите модель.\n\nДоступные:\n{available}")
+        await update.message.reply_text(f"Specify a model.\n\nAvailable:\n{available}")
         return
     result = await _apply_model_choice(user_id, context.args[0].lower())
     await update.message.reply_text(result)
@@ -465,7 +482,7 @@ async def set_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     user_histories[user_id] = []
-    await update.message.reply_text("История очищена!")
+    await update.message.reply_text("History cleared!")
 
 
 @restricted
@@ -473,14 +490,14 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if user_id != ADMIN_USER_ID:
         return  # silently ignore for non-admins
-    top_models = ", ".join(f"{k}:{v}" for k, v in STATS['by_model'].most_common(5)) or "—"
+    top_models = ", ".join(f"{k}:{v}" for k, v in STATS['by_model'].most_common(5)) or "-"
     text = (
-        "📊 Статистика с последнего рестарта:\n\n"
-        f"Сообщений в чате: {STATS['chat_total']}\n"
-        f"Картинок сгенерировано: {STATS['image_total']}\n"
-        f"Голосовых обработано: {STATS['voice_total']}\n"
-        f"Уникальных пользователей: {len(STATS['by_user'])}\n"
-        f"Топ моделей: {top_models}"
+        "📊 Stats since last restart:\n\n"
+        f"Chat messages: {STATS['chat_total']}\n"
+        f"Images generated: {STATS['image_total']}\n"
+        f"Voice messages handled: {STATS['voice_total']}\n"
+        f"Unique users: {len(STATS['by_user'])}\n"
+        f"Top models: {top_models}"
     )
     await update.message.reply_text(text)
 
@@ -497,42 +514,54 @@ async def generate_and_send_image(update: Update, context: ContextTypes.DEFAULT_
         return
 
     prompt = f"{description}, {style_suffix}" if style_suffix else description
-    msg = await update.effective_message.reply_text("Генерирую изображение, подождите ~20 секунд...")
+    msg = await update.effective_message.reply_text("Generating image, please wait ~20 seconds...")
 
-    try:
-        import urllib.parse
-        import random
-        encoded = urllib.parse.quote(prompt, safe='')
-        seed = random.randint(1, 99999)
-        pk_key = os.getenv('POLLINATIONS_KEY', '')
-        url = f"https://gen.pollinations.ai/image/{encoded}?seed={seed}&nologo=true&key={pk_key}"
+    import urllib.parse
+    import random
+    import asyncio
 
-        logger.info(f"Pollinations request: {url}")
-        response = requests.get(url, timeout=120)
+    encoded = urllib.parse.quote(prompt, safe='')
+    pk_key = os.getenv('POLLINATIONS_KEY', '')
 
-        if response.status_code == 200:
-            await update.effective_message.reply_photo(
-                photo=io.BytesIO(response.content),
-                caption=description
-            )
-            await msg.delete()
-            record_image_request(user_id)
-        else:
-            await msg.edit_text(f"Ошибка генерации: {response.status_code}. Попробуйте ещё раз.")
+    MAX_ATTEMPTS = 2
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            seed = random.randint(1, 99999)
+            url = f"https://gen.pollinations.ai/image/{encoded}?seed={seed}&nologo=true&key={pk_key}"
+            logger.info(f"Pollinations request (attempt {attempt}): {url}")
+            response = requests.get(url, timeout=120)
 
-    except requests.Timeout:
-        await msg.edit_text("Время ожидания истекло. Попробуйте ещё раз.")
-    except Exception as e:
-        logger.error(f"Image error: {e}")
-        await msg.edit_text(f"Ошибка: {str(e)}")
+            if response.status_code == 200:
+                await update.effective_message.reply_photo(
+                    photo=io.BytesIO(response.content),
+                    caption=description
+                )
+                await msg.delete()
+                record_image_request(user_id)
+                return
+
+            logger.warning(f"Pollinations returned {response.status_code} on attempt {attempt}")
+            if attempt == MAX_ATTEMPTS:
+                await msg.edit_text(f"Generation error: {response.status_code}. Please try again.")
+
+        except requests.Timeout:
+            logger.warning(f"Pollinations timed out on attempt {attempt}")
+            if attempt == MAX_ATTEMPTS:
+                await msg.edit_text("Timed out after retrying. The image service may be overloaded right now - please try again in a bit.")
+            else:
+                await asyncio.sleep(1)
+        except Exception:
+            logger.exception("Image error")
+            await msg.edit_text("Something went wrong generating the image. Please try again.")
+            return
 
 
 @restricted
 async def image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
-            "Укажите описание.\nПример: /image закат в горах --anime\n\n"
-            "Или откройте /menu → 🖼 Картинки, чтобы выбрать стиль кнопкой."
+            "Specify a description.\nExample: /image sunset over mountains --anime\n\n"
+            "Or open /menu -> 🖼 Images to pick a style with a button."
         )
         return
 
@@ -549,13 +578,24 @@ async def image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── Chat (text) ────────────────────────────────────────────────────────
 
+LANGUAGE_INSTRUCTION = (
+    "Always reply in the same language the user's most recent message is "
+    "written in (text or transcribed speech). If the message mixes languages, "
+    "use whichever language dominates it."
+)
+
+
 async def run_chat_turn(user_id, model_key, content):
     """content: a string, or a list of genai Parts (e.g. for voice input)."""
     if user_id not in user_histories:
         user_histories[user_id] = []
 
     model_name = ALL_MODELS[model_key][0]
-    session = gemini_client.chats.create(model=model_name, history=user_histories[user_id])
+    session = gemini_client.chats.create(
+        model=model_name,
+        history=user_histories[user_id],
+        config=types.GenerateContentConfig(system_instruction=LANGUAGE_INSTRUCTION),
+    )
     response = session.send_message(content)
     user_histories[user_id] = session.get_history()[-20:]
     return response.text
@@ -593,9 +633,9 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chunk = full_response[i:i + MAX_LENGTH]
             await send_markdown_safe(update.message, chunk, reply_markup=tts_button_markup())
 
-    except Exception as e:
-        logger.error(f"Chat error: {e}")
-        await update.message.reply_text("Ошибка обращения к Gemini. Попробуйте ещё раз.")
+    except Exception:
+        logger.exception("Chat error")
+        await update.message.reply_text("Error reaching Gemini. Please try again.")
 
 
 # ── Voice messages ────────────────────────────────────────────────────
@@ -638,9 +678,9 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chunk = full_response[i:i + MAX_LENGTH]
                 await send_markdown_safe(update.message, chunk, reply_markup=tts_button_markup())
 
-    except Exception as e:
-        logger.error(f"Voice message error: {e}")
-        await update.message.reply_text("Не удалось обработать голосовое сообщение. Попробуйте ещё раз.")
+    except Exception:
+        logger.exception("Voice message error")
+        await update.message.reply_text("Couldn't process the voice message. Please try again.")
 
 
 # ── Callback query (button) handler ──────────────────────────────────────
@@ -660,21 +700,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.RECORD_VOICE)
             audio_bytes = synthesize_speech(text)
             await query.message.reply_audio(audio=io.BytesIO(audio_bytes), filename="reply.wav")
-        except Exception as e:
-            logger.error(f"TTS button error: {e}")
-            await query.message.reply_text("Не удалось озвучить ответ.")
+        except Exception:
+            logger.exception("TTS button error")
+            await query.message.reply_text("Couldn't generate audio for this reply.")
         return
 
     await query.answer()
 
     if data == "nav:main":
-        await query.edit_message_text("Главное меню:", reply_markup=main_menu_markup())
+        await query.edit_message_text("Main menu:", reply_markup=main_menu_markup())
 
     elif data == "nav:help":
         await query.edit_message_text(HELP_TEXT, reply_markup=InlineKeyboardMarkup([back_button()]))
 
     elif data == "nav:models":
-        await query.edit_message_text("Выберите модель:", reply_markup=models_menu_markup(user_id))
+        await query.edit_message_text("Choose a model:", reply_markup=models_menu_markup(user_id))
 
     elif data.startswith("model:"):
         selected_key = data.split(":", 1)[1]
@@ -683,20 +723,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "nav:voice":
         await query.edit_message_text(
-            "Как отвечать на голосовые сообщения?",
+            "How should I reply to voice messages?",
             reply_markup=voice_menu_markup(user_id)
         )
 
     elif data in ("voice:text", "voice:voice"):
         user_voice_mode[user_id] = 'voice' if data == "voice:voice" else 'text'
         await query.edit_message_text(
-            "Как отвечать на голосовые сообщения?",
+            "How should I reply to voice messages?",
             reply_markup=voice_menu_markup(user_id)
         )
 
     elif data == "nav:image":
         await query.edit_message_text(
-            "Выберите стиль, затем напишите, что нарисовать:",
+            "Pick a style, then type what to draw:",
             reply_markup=image_menu_markup()
         )
 
@@ -704,11 +744,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         style_key = data.split(":", 1)[1]
         user_pending_image_style[user_id] = style_key
         label = STYLES[style_key][0]
-        await query.edit_message_text(f"Стиль выбран: {label}\n\nТеперь напишите, что нарисовать.")
+        await query.edit_message_text(f"Style selected: {label}\n\nNow type what you'd like to draw.")
 
     elif data == "nav:clear":
         user_histories[user_id] = []
-        await query.edit_message_text("История очищена!", reply_markup=InlineKeyboardMarkup([back_button()]))
+        await query.edit_message_text("History cleared!", reply_markup=InlineKeyboardMarkup([back_button()]))
 
 
 # ── App wiring ────────────────────────────────────────────────────────
@@ -718,7 +758,7 @@ def main():
     if not token:
         raise ValueError("TELEGRAM_TOKEN not found in .env file")
 
-    app = Application.builder().token(token).build()
+    app = Application.builder().token(token).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
