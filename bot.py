@@ -139,6 +139,7 @@ STYLES = {
     'art':     ('🖌 Art', 'digital art, artstation, concept art, detailed'),
     'dark':    ('🌑 Dark', 'dark fantasy, moody, dramatic lighting'),
     'minimal': ('⚪ Minimal', 'minimalist, clean, simple, white background'),
+	'none':    ('⭐ Custom', ''),
 }
 # Kept for users who still type the old --flags with /image
 LEGACY_STYLE_FLAGS = {
