@@ -139,7 +139,7 @@ STYLES = {
     'art':     ('🖌 Art', 'digital art, artstation, concept art, detailed'),
     'dark':    ('🌑 Dark', 'dark fantasy, moody, dramatic lighting'),
     'minimal': ('⚪ Minimal', 'minimalist, clean, simple, white background'),
-	'none':    ('⭐ Custom', ''),
+    'none':    ('⭐ Custom', ''),
 }
 # Kept for users who still type the old --flags with /image
 LEGACY_STYLE_FLAGS = {
@@ -299,7 +299,8 @@ async def send_markdown_safe(message, text: str, reply_markup=None):
 # ── Text-to-speech / speech understanding helpers ───────────────────────
 
 def synthesize_speech(text: str) -> bytes:
-    """Calls Gemini TTS and returns WAV-encoded audio bytes."""
+    """Calls Gemini TTS and returns OGG/Opus-encoded audio bytes, ready to be
+    sent as a real Telegram voice message (waveform bubble) via reply_voice."""
     response = gemini_client.models.generate_content(
         model=TTS_MODEL,
         contents=text,
@@ -314,13 +315,19 @@ def synthesize_speech(text: str) -> bytes:
     )
     pcm_data = response.candidates[0].content.parts[0].inline_data.data
 
-    buffer = io.BytesIO()
-    with wave.open(buffer, 'wb') as wav_file:
+    wav_buffer = io.BytesIO()
+    with wave.open(wav_buffer, 'wb') as wav_file:
         wav_file.setnchannels(1)
         wav_file.setsampwidth(2)
         wav_file.setframerate(24000)
         wav_file.writeframes(pcm_data)
-    return buffer.getvalue()
+    wav_buffer.seek(0)
+
+    from pydub import AudioSegment
+    audio = AudioSegment.from_wav(wav_buffer)
+    ogg_buffer = io.BytesIO()
+    audio.export(ogg_buffer, format="ogg", codec="libopus")
+    return ogg_buffer.getvalue()
 
 
 def strip_trailer(text: str) -> str:
@@ -672,9 +679,9 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if mode == 'voice':
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.RECORD_VOICE)
             audio_bytes = synthesize_speech(strip_trailer(reply_text))
-            await update.message.reply_audio(
-                audio=io.BytesIO(audio_bytes),
-                filename="reply.wav",
+            await update.message.reply_voice(
+                voice=io.BytesIO(audio_bytes),
+                filename="reply.ogg",
                 caption=f"🤖 {ALL_MODELS[model_key][0]}"
             )
         else:
@@ -705,7 +712,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.RECORD_VOICE)
             audio_bytes = synthesize_speech(text)
-            await query.message.reply_audio(audio=io.BytesIO(audio_bytes), filename="reply.wav")
+            await query.message.reply_voice(voice=io.BytesIO(audio_bytes), filename="reply.ogg")
         except Exception as e:
             logger.exception("TTS button error")
             await query.message.reply_text("Couldn't generate audio for this reply.")

@@ -3,3 +3,4 @@ google-genai==2.9.0
 requests
 python-dotenv
 httpx==0.28.1
+pydub
