@@ -387,16 +387,20 @@ def image_menu_markup():
 
 
 HELP_TEXT = (
-    "Commands:\n\n"
-    "Just type a message - I'll reply via Gemini AI\n"
-    "Send a voice message - I'll reply with text or voice (configurable in /menu → Voice)\n\n"
+    "🤗 Welcome! I'm an AI assistant powered by Gemini.\n\n"
+    "What I can do:\n"
+    "• Chat - just type a message\n"
+    "• Voice - send a voice message, I can reply in text or voice (see /menu → 🎙 Voice)\n"
+    "• Images - generate pictures with /image or /menu → 🖼 Images\n"
+    "• Multiple models - switch anytime with /setmodel or /menu → 🤖 Models\n\n"
+    "Commands:\n"
     "/menu - main menu with buttons\n"
     "/models - list available models\n"
     "/model - current model\n"
     "/setmodel <name> - switch model by typing\n"
     "/image <description> - generate an image (add --anime --art --dark --minimal --photo)\n"
     "/clear - clear conversation history\n"
-    "/help - this message"
+    "/help - show this message"
 )
 
 START_TEXT = (
@@ -405,19 +409,23 @@ START_TEXT = (
 )
 
 BOT_COMMANDS = [
-    ("menu", "📋 Open the main menu"),
-    ("help", "👋 Show help"),
+    ("help", "🤗 Welcome!"),
+    ("menu", "📋 Main menu"),
     ("model", "🤖 Show current model"),
-    ("setmodel", "Switch model by name"),
-    ("image", "Generate an image"),
-    ("clear", "Clear conversation history"),
+    ("setmodel", "🤖 Models"),
+    ("image", "🎨 Image"),
+    ("clear", "🧹 Clear history"),
 ]
 
 
 async def post_init(app: Application):
-    """Registers the command list so Telegram shows the native Menu button."""
+    """Registers the command list so Telegram shows the native Menu button.
+    Wrapped in try/except: a bad command list must never crash the whole bot."""
     from telegram import BotCommand
-    await app.bot.set_my_commands([BotCommand(cmd, desc) for cmd, desc in BOT_COMMANDS])
+    try:
+        await app.bot.set_my_commands([BotCommand(cmd, desc) for cmd, desc in BOT_COMMANDS])
+    except Exception:
+        logger.exception("Failed to set bot commands (menu button); continuing without it")
 
 
 # ── Command handlers ──────────────────────────────────────────────────────
@@ -469,8 +477,7 @@ async def _apply_model_choice(user_id, selected_key) -> str:
 async def set_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if not context.args:
-        available = '\n'.join(available_models_for(user_id).keys())
-        await update.message.reply_text(f"Specify a model.\n\nAvailable:\n{available}")
+        await update.message.reply_text("Choose a model:", reply_markup=models_menu_markup(user_id))
         return
     result = await _apply_model_choice(user_id, context.args[0].lower())
     await update.message.reply_text(result)
@@ -558,8 +565,8 @@ async def generate_and_send_image(update: Update, context: ContextTypes.DEFAULT_
 async def image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
-            "Specify a description.\nExample: /image sunset over mountains --anime\n\n"
-            "Or open /menu -> 🖼 Images to pick a style with a button."
+            "Pick a style, then type what to draw:",
+            reply_markup=image_menu_markup()
         )
         return
 
@@ -631,7 +638,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chunk = full_response[i:i + MAX_LENGTH]
             await send_markdown_safe(update.message, chunk, reply_markup=tts_button_markup())
 
-    except Exception:
+    except Exception as e:
         logger.exception("Chat error")
         await update.message.reply_text("Error reaching Gemini. Please try again.")
 
@@ -676,7 +683,7 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chunk = full_response[i:i + MAX_LENGTH]
                 await send_markdown_safe(update.message, chunk, reply_markup=tts_button_markup())
 
-    except Exception:
+    except Exception as e:
         logger.exception("Voice message error")
         await update.message.reply_text("Couldn't process the voice message. Please try again.")
 
@@ -698,7 +705,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.RECORD_VOICE)
             audio_bytes = synthesize_speech(text)
             await query.message.reply_audio(audio=io.BytesIO(audio_bytes), filename="reply.wav")
-        except Exception:
+        except Exception as e:
             logger.exception("TTS button error")
             await query.message.reply_text("Couldn't generate audio for this reply.")
         return
