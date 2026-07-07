@@ -4,6 +4,7 @@ import io
 import re
 import sys
 import wave
+import asyncio
 import logging
 from collections import defaultdict, Counter
 from time import time
@@ -12,6 +13,7 @@ import requests
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from google.genai import errors as genai_errors
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode, ChatAction
 from telegram.ext import (
@@ -597,21 +599,40 @@ LANGUAGE_INSTRUCTION = (
     "use whichever language dominates it."
 )
 
+AUDIO_INSTRUCTION = (
+    "The user's message is a voice recording. Respond only to the words they "
+    "actually spoke. If the recording is too short, silent, or too unclear to "
+    "make out real words, say so honestly and ask them to resend a clearer or "
+    "longer recording - never guess or comment on technical properties like "
+    "the file's duration instead of its content."
+)
 
-async def run_chat_turn(user_id, model_key, content):
-    """content: a string, or a list of genai Parts (e.g. for voice input)."""
+
+async def run_chat_turn(user_id, model_key, content, max_attempts=3):
+    """content: a string, or a list of genai Parts (e.g. for voice input).
+    Retries automatically on Gemini 503 (overloaded) errors before giving up."""
     if user_id not in user_histories:
         user_histories[user_id] = []
 
     model_name = ALL_MODELS[model_key][0]
-    session = gemini_client.chats.create(
-        model=model_name,
-        history=user_histories[user_id],
-        config=types.GenerateContentConfig(system_instruction=LANGUAGE_INSTRUCTION),
-    )
-    response = session.send_message(content)
-    user_histories[user_id] = session.get_history()[-20:]
-    return response.text
+    is_audio = isinstance(content, list)
+    system_instruction = LANGUAGE_INSTRUCTION + (f" {AUDIO_INSTRUCTION}" if is_audio else "")
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            session = gemini_client.chats.create(
+                model=model_name,
+                history=user_histories[user_id],
+                config=types.GenerateContentConfig(system_instruction=system_instruction),
+            )
+            response = session.send_message(content)
+            user_histories[user_id] = session.get_history()[-20:]
+            return response.text
+        except genai_errors.ServerError:
+            logger.warning(f"Gemini overloaded (attempt {attempt}/{max_attempts})")
+            if attempt == max_attempts:
+                raise
+            await asyncio.sleep(2 * attempt)
 
 
 @restricted
@@ -646,7 +667,10 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chunk = full_response[i:i + MAX_LENGTH]
             await send_markdown_safe(update.message, chunk, reply_markup=tts_button_markup())
 
-    except Exception as e:
+    except genai_errors.ServerError:
+        logger.exception("Chat error - Gemini overloaded")
+        await update.message.reply_text("Google's servers are overloaded right now. Please try again in a minute.")
+    except Exception:
         logger.exception("Chat error")
         await update.message.reply_text("Error reaching Gemini. Please try again.")
 
@@ -662,6 +686,7 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(limit_msg)
         return
 
+    waiting_msg = await update.message.reply_text("🎤 Listening to your voice message...")
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
 
     try:
@@ -673,6 +698,8 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_text = await run_chat_turn(user_id, model_key, [audio_part])
         record_chat_request(user_id, model_key)
         record_voice_request()
+
+        await waiting_msg.delete()
 
         mode = user_voice_mode.get(user_id, 'text')
 
@@ -691,9 +718,12 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chunk = full_response[i:i + MAX_LENGTH]
                 await send_markdown_safe(update.message, chunk, reply_markup=tts_button_markup())
 
-    except Exception as e:
+    except genai_errors.ServerError:
+        logger.exception("Voice message error - Gemini overloaded")
+        await waiting_msg.edit_text("Google's servers are overloaded right now. Please try again in a minute.")
+    except Exception:
         logger.exception("Voice message error")
-        await update.message.reply_text("Couldn't process the voice message. Please try again.")
+        await waiting_msg.edit_text("Couldn't process the voice message. Please try again.")
 
 
 # ── Callback query (button) handler ──────────────────────────────────────
