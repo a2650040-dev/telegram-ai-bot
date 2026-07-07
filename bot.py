@@ -405,11 +405,9 @@ START_TEXT = (
 )
 
 BOT_COMMANDS = [
-    ("start", "Start the bot"),
-    ("menu", "Open the main menu"),
-    ("help", "Show help"),
-    ("models", "List available models"),
-    ("model", "Show current model"),
+    ("📋Main menu", "Open the main menu"),
+    ("👋Help", "Show help"),
+    ("🤖Model", "Show current model"),
     ("setmodel", "Switch model by name"),
     ("image", "Generate an image"),
     ("clear", "Clear conversation history"),
