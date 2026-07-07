@@ -400,7 +400,7 @@ HELP_TEXT = (
     "/setmodel <name> - switch model by typing\n"
     "/image <description> - generate an image (add --anime --art --dark --minimal --photo)\n"
     "/clear - clear conversation history\n"
-    "/help - show this message"
+    "/welcome - show this message"
 )
 
 START_TEXT = (
@@ -409,7 +409,7 @@ START_TEXT = (
 )
 
 BOT_COMMANDS = [
-    ("help", "🤗 Welcome!"),
+    ("welcome", "🤗 Welcome!"),
     ("menu", "📋 Main menu"),
     ("model", "🤖 Show current model"),
     ("setmodel", "🤖 Models"),
@@ -767,7 +767,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
-    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("welcome", help_command))
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("stats", stats_command))
 
