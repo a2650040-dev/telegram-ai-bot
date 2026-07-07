@@ -107,7 +107,7 @@ TRUSTED_MODELS = {
 }
 
 ALL_MODELS = {**PUBLIC_MODELS, **TRUSTED_MODELS}
-DEFAULT_MODEL = 'flash25lite'
+DEFAULT_MODEL = 'flash25'
 TTS_MODEL = 'gemini-2.5-flash-preview-tts'
 TTS_VOICE = 'Kore'
 
@@ -300,9 +300,9 @@ async def send_markdown_safe(message, text: str, reply_markup=None):
 
 # ── Text-to-speech / speech understanding helpers ───────────────────────
 
-def synthesize_speech(text: str) -> bytes:
-    """Calls Gemini TTS and returns OGG/Opus-encoded audio bytes, ready to be
-    sent as a real Telegram voice message (waveform bubble) via reply_voice."""
+def synthesize_speech(text: str) -> tuple[bytes, int]:
+    """Calls Gemini TTS and returns (OGG/Opus-encoded audio bytes, duration in seconds),
+    ready to be sent as a real Telegram voice message (waveform bubble) via reply_voice."""
     response = gemini_client.models.generate_content(
         model=TTS_MODEL,
         contents=text,
@@ -327,9 +327,10 @@ def synthesize_speech(text: str) -> bytes:
 
     from pydub import AudioSegment
     audio = AudioSegment.from_wav(wav_buffer)
+    duration_seconds = int(len(audio) / 1000)
     ogg_buffer = io.BytesIO()
     audio.export(ogg_buffer, format="ogg", codec="libopus")
-    return ogg_buffer.getvalue()
+    return ogg_buffer.getvalue(), duration_seconds
 
 
 def strip_trailer(text: str) -> str:
@@ -653,12 +654,15 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(limit_msg)
         return
 
+    waiting_msg = await update.message.reply_text("💭 Please wait, preparing a response...")
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
 
     try:
         model_key = get_user_model_key(user_id)
         reply_text = await run_chat_turn(user_id, model_key, user_message)
         record_chat_request(user_id, model_key)
+
+        await waiting_msg.delete()
 
         full_response = f"{reply_text}\n\n🤖 Model: {ALL_MODELS[model_key][0]}"
 
@@ -669,10 +673,10 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except genai_errors.ServerError:
         logger.exception("Chat error - Gemini overloaded")
-        await update.message.reply_text("Google's servers are overloaded right now. Please try again in a minute.")
+        await waiting_msg.edit_text("Google's servers are overloaded right now. Please try again in a minute.")
     except Exception:
         logger.exception("Chat error")
-        await update.message.reply_text("Error reaching Gemini. Please try again.")
+        await waiting_msg.edit_text("Error reaching Gemini. Please try again.")
 
 
 # ── Voice messages ────────────────────────────────────────────────────
@@ -699,19 +703,20 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         record_chat_request(user_id, model_key)
         record_voice_request()
 
-        await waiting_msg.delete()
-
         mode = user_voice_mode.get(user_id, 'text')
 
         if mode == 'voice':
+            await waiting_msg.edit_text("🔊 Generating voice reply...")
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.RECORD_VOICE)
-            audio_bytes = synthesize_speech(strip_trailer(reply_text))
+            audio_bytes, duration = synthesize_speech(strip_trailer(reply_text))
+            await waiting_msg.delete()
             await update.message.reply_voice(
                 voice=io.BytesIO(audio_bytes),
                 filename="reply.ogg",
-                caption=f"🤖 {ALL_MODELS[model_key][0]}"
+                duration=duration
             )
         else:
+            await waiting_msg.delete()
             full_response = f"{reply_text}\n\n🤖 Model: {ALL_MODELS[model_key][0]}"
             MAX_LENGTH = 4000
             for i in range(0, len(full_response), MAX_LENGTH):
@@ -735,17 +740,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data == "tts:read":
-        await query.answer()
+        try:
+            await query.answer()
+        except Exception:
+            logger.warning("Couldn't answer callback query (likely expired) - continuing anyway")
         text = strip_trailer(query.message.text or "")
         if not text:
             return
+        waiting_msg = await query.message.reply_text("🔊 Generating audio, please wait...")
         try:
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.RECORD_VOICE)
-            audio_bytes = synthesize_speech(text)
-            await query.message.reply_voice(voice=io.BytesIO(audio_bytes), filename="reply.ogg")
-        except Exception as e:
+            audio_bytes, duration = synthesize_speech(text)
+            await waiting_msg.delete()
+            await query.message.reply_voice(voice=io.BytesIO(audio_bytes), filename="reply.ogg", duration=duration)
+        except Exception:
             logger.exception("TTS button error")
-            await query.message.reply_text("Couldn't generate audio for this reply.")
+            await waiting_msg.edit_text("Couldn't generate audio for this reply.")
         return
 
     await query.answer()
