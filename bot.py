@@ -686,7 +686,7 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(limit_msg)
         return
 
-    waiting_msg = await update.message.reply_text("🎤 Listening to your voice message...")
+    waiting_msg = await update.message.reply_text("🎤 Processing your voice message...")
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
 
     try:
