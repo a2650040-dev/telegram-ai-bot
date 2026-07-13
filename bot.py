@@ -3,6 +3,7 @@ import os
 import io
 import re
 import sys
+import json
 import wave
 import asyncio
 import logging
@@ -19,6 +20,11 @@ from telegram.constants import ParseMode, ChatAction
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
+)
+
+from memory import (
+    init_db, save_message, get_recent_history,
+    get_profile, maybe_refresh_summary, clear_history,
 )
 
 load_dotenv()
@@ -438,6 +444,11 @@ async def post_init(app: Application):
     except Exception:
         logger.exception("Failed to set bot commands (menu button); continuing without it")
 
+    try:
+        await init_db()
+    except Exception:
+        logger.exception("Failed to initialize memory DB - persistent memory will not work this run")
+
 
 # ── Command handlers ──────────────────────────────────────────────────────
 
@@ -498,6 +509,10 @@ async def set_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     user_histories[user_id] = []
+    try:
+        await clear_history(user_id)
+    except Exception:
+        logger.exception(f"Failed to clear DB history for user_id={user_id}")
     await update.message.reply_text("History cleared!")
 
 
@@ -608,27 +623,138 @@ AUDIO_INSTRUCTION = (
     "the file's duration instead of its content."
 )
 
+VOICE_JSON_INSTRUCTION = (
+    "You must respond with a single JSON object with exactly two string fields: "
+    "'transcript' (a faithful transcription of what the user actually said, in "
+    "the language they spoke it in, with no translation and no commentary) and "
+    "'reply' (your normal conversational reply to them, following all the rules "
+    "above). Do not include anything outside the JSON object."
+)
+
+VOICE_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "transcript": {"type": "string"},
+        "reply": {"type": "string"},
+    },
+    "required": ["transcript", "reply"],
+}
+
+
+def _parse_voice_turn(raw_text: str):
+    """Parses the {"transcript": ..., "reply": ...} JSON we asked Gemini for.
+    Returns (reply_text, transcript_text) on success, or None if the model
+    didn't return valid/complete JSON - the caller is responsible for
+    falling back to a plain-text retry rather than showing the user a raw
+    JSON fragment."""
+    try:
+        data = json.loads(raw_text)
+        reply = (data.get("reply") or "").strip()
+        transcript = (data.get("transcript") or "").strip()
+        if reply:
+            return reply, (transcript or "[voice message]")
+    except (json.JSONDecodeError, AttributeError):
+        pass
+    return None
+
+
+async def _hydrate_history(user_id):
+    """Cold start (fresh process after a deploy/restart): rebuild this
+    user's Gemini chat history from Postgres instead of starting empty."""
+    rows = await get_recent_history(user_id, limit=20)
+    return [
+        types.Content(role=row['role'], parts=[types.Part.from_text(text=row['content'])])
+        for row in rows
+    ]
+
 
 async def run_chat_turn(user_id, model_key, content, max_attempts=3):
     """content: a string, or a list of genai Parts (e.g. for voice input).
-    Retries automatically on Gemini 503 (overloaded) errors before giving up."""
+    Retries automatically on Gemini 503 (overloaded) errors before giving up.
+    History and a long-term profile live in Postgres, so this survives
+    deploys/restarts - the in-memory dict is just a per-process cache.
+
+    For voice input, asks Gemini for {transcript, reply} in the same call:
+    'reply' is what gets sent/spoken back to the user, 'transcript' is what
+    gets stored in memory (in place of the raw audio) - one API call, no
+    extra latency or meaningful token cost beyond the audio Gemini already
+    has to process either way. If Gemini fails to return valid JSON (rare),
+    we retry once with a plain-text request instead of ever showing the
+    user a raw/truncated JSON fragment."""
     if user_id not in user_histories:
-        user_histories[user_id] = []
+        try:
+            user_histories[user_id] = await _hydrate_history(user_id)
+        except Exception:
+            logger.exception(f"Could not load history from DB for user_id={user_id}, starting empty")
+            user_histories[user_id] = []
 
     model_name = ALL_MODELS[model_key][0]
     is_audio = isinstance(content, list)
-    system_instruction = LANGUAGE_INSTRUCTION + (f" {AUDIO_INSTRUCTION}" if is_audio else "")
+
+    try:
+        profile = await get_profile(user_id)
+    except Exception:
+        logger.exception(f"Could not load profile for user_id={user_id}")
+        profile = None
+    profile_note = f" What you know about this user: {profile['summary']}" if profile and profile['summary'] else ""
+
+    base_system_instruction = LANGUAGE_INSTRUCTION + profile_note + (f" {AUDIO_INSTRUCTION}" if is_audio else "")
+    json_system_instruction = base_system_instruction + (f" {VOICE_JSON_INSTRUCTION}" if is_audio else "")
+
+    config_kwargs = {"system_instruction": json_system_instruction}
+    if is_audio:
+        config_kwargs["response_mime_type"] = "application/json"
+        config_kwargs["response_schema"] = VOICE_RESPONSE_SCHEMA
 
     for attempt in range(1, max_attempts + 1):
         try:
             session = gemini_client.chats.create(
                 model=model_name,
                 history=user_histories[user_id],
-                config=types.GenerateContentConfig(system_instruction=system_instruction),
+                config=types.GenerateContentConfig(**config_kwargs),
             )
             response = session.send_message(content)
-            user_histories[user_id] = session.get_history()[-20:]
-            return response.text
+
+            if is_audio:
+                parsed = _parse_voice_turn(response.text)
+                if parsed is None:
+                    # Gemini didn't comply with the JSON schema - rather than
+                    # show the user a broken JSON fragment, ask again plainly.
+                    logger.warning(f"Voice turn: invalid JSON from Gemini for user_id={user_id}, retrying without schema")
+                    plain_session = gemini_client.chats.create(
+                        model=model_name,
+                        history=user_histories[user_id],
+                        config=types.GenerateContentConfig(system_instruction=base_system_instruction),
+                    )
+                    plain_response = plain_session.send_message(content)
+                    reply_text = plain_response.text
+                    stored_user_text = "[voice message]"  # no transcript available this time
+                else:
+                    reply_text, stored_user_text = parsed
+            else:
+                reply_text = response.text
+                stored_user_text = content
+
+            if is_audio:
+                # Swap the raw audio-in / raw-JSON-out turn for clean text
+                # equivalents, so future turns don't keep re-sending audio
+                # bytes as context (expensive) and history stays readable.
+                raw_history = session.get_history()
+                base_history = raw_history[:-2] if len(raw_history) >= 2 else []
+                base_history.append(types.Content(role='user', parts=[types.Part.from_text(text=stored_user_text)]))
+                base_history.append(types.Content(role='model', parts=[types.Part.from_text(text=reply_text)]))
+                user_histories[user_id] = base_history[-20:]
+            else:
+                user_histories[user_id] = session.get_history()[-20:]
+
+            try:
+                await save_message(user_id, "user", stored_user_text)
+                await save_message(user_id, "model", reply_text)
+                await maybe_refresh_summary(user_id, gemini_client)
+            except Exception:
+                logger.exception(f"Failed to persist memory for user_id={user_id} (reply still sent normally)")
+
+            return reply_text
         except genai_errors.ServerError:
             logger.warning(f"Gemini overloaded (attempt {attempt}/{max_attempts})")
             if attempt == max_attempts:
@@ -801,6 +927,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "nav:clear":
         user_histories[user_id] = []
+        try:
+            await clear_history(user_id)
+        except Exception:
+            logger.exception(f"Failed to clear DB history for user_id={user_id}")
         await query.edit_message_text("History cleared!", reply_markup=InlineKeyboardMarkup([back_button()]))
 
 
