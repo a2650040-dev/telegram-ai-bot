@@ -26,6 +26,7 @@ from memory import (
     init_db, save_message, get_recent_history,
     get_profile, maybe_refresh_summary, clear_history,
     get_user_settings, set_user_model, set_user_voice_mode,
+    delete_user_data,
 )
 
 load_dotenv()
@@ -439,7 +440,21 @@ HELP_TEXT = (
     "/setmodel <name> - switch model by typing\n"
     "/image <description> - generate an image (add --anime --art --dark --minimal --photo)\n"
     "/clear - clear conversation history\n"
+    "/privacy - what I remember about you, and how to delete it\n"
     "/welcome - show this message"
+)
+
+PRIVACY_TEXT = (
+    "What I remember:\n"
+    "• Your recent conversation history (used so I have context between messages)\n"
+    "• A short profile summary I build up over time (name, interests, style - "
+    "so I don't start from zero every conversation)\n"
+    "• Your chosen model and voice-reply setting\n\n"
+    "For voice messages, I store a text transcript of what you said, not the audio itself.\n\n"
+    "This is stored in a database so it survives restarts - it isn't shared with other users, "
+    "and only the bot owner has access to the underlying database.\n\n"
+    "/clear wipes your conversation history only (keeps your profile and settings).\n"
+    "/forget_me wipes everything I have about you - history, profile, and settings, all at once."
 )
 
 START_TEXT = (
@@ -454,6 +469,8 @@ BOT_COMMANDS = [
     ("setmodel", "🤖 Models"),
     ("image", "🎨 Image"),
     ("clear", "🧹 Clear history"),
+    ("privacy", "🔒 Privacy"),
+    ("forget_me", "🗑️ Forget me"),
 ]
 
 
@@ -540,6 +557,33 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         logger.exception(f"Failed to clear DB history for user_id={user_id}")
     await update.message.reply_text("History cleared!")
+
+
+@restricted
+async def privacy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(PRIVACY_TEXT)
+
+
+@restricted
+async def forget_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    # Clear everything in the in-process caches too, not just the DB -
+    # otherwise the old model/voice-mode/history would keep answering
+    # from RAM until the next restart even though the DB is clean.
+    user_histories.pop(user_id, None)
+    user_models.pop(user_id, None)
+    user_voice_mode.pop(user_id, None)
+    _settings_hydrated_users.discard(user_id)
+    try:
+        await delete_user_data(user_id)
+    except Exception:
+        logger.exception(f"Failed to delete user data for user_id={user_id}")
+        await update.message.reply_text("Something went wrong clearing your data - please try again.")
+        return
+    await update.message.reply_text(
+        "Done - I've deleted your conversation history, profile, and settings. "
+        "Next message will start completely fresh."
+    )
 
 
 @restricted
@@ -977,6 +1021,8 @@ def main():
     app.add_handler(CommandHandler("menu", menu))
     app.add_handler(CommandHandler("welcome", help_command))
     app.add_handler(CommandHandler("clear", clear))
+    app.add_handler(CommandHandler("privacy", privacy_command))
+    app.add_handler(CommandHandler("forget_me", forget_me))
     app.add_handler(CommandHandler("stats", stats_command))
 
     app.add_handler(CommandHandler("models", models))

@@ -93,6 +93,16 @@ async def clear_history(user_id: int):
         await conn.execute("DELETE FROM messages WHERE user_id = $1", user_id)
 
 
+async def delete_user_data(user_id: int):
+    """Full wipe: history, profile summary, and saved settings - everything
+    Postgres knows about this user. Used by /forget_me, unlike /clear which
+    only touches conversation history."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM messages WHERE user_id = $1", user_id)
+        await conn.execute("DELETE FROM user_profile WHERE user_id = $1", user_id)
+
+
 async def get_profile(user_id: int):
     pool = await get_pool()
     async with pool.acquire() as conn:
