@@ -25,6 +25,7 @@ from telegram.ext import (
 from memory import (
     init_db, save_message, get_recent_history,
     get_profile, maybe_refresh_summary, clear_history,
+    get_user_settings, set_user_model, set_user_voice_mode,
 )
 
 load_dotenv()
@@ -93,6 +94,7 @@ def restricted(handler):
                 "Sorry, this bot is private and only available to approved users."
             )
             return
+        await _ensure_user_settings_hydrated(user_id)
         return await handler(update, context)
     return wrapper
 
@@ -121,6 +123,26 @@ user_histories = {}
 user_models = {}
 user_voice_mode = {}          # user_id -> 'text' (default) or 'voice'
 user_pending_image_style = {}  # user_id -> style suffix waiting for a description
+
+_settings_hydrated_users = set()  # user_ids we've already tried to load settings for this run
+
+
+async def _ensure_user_settings_hydrated(user_id):
+    """Loads model_key/voice_mode from Postgres into the in-memory dicts,
+    once per user per process. Everything after this keeps reading/writing
+    the plain dicts as before - this just stops them resetting on deploy."""
+    if user_id in _settings_hydrated_users:
+        return
+    _settings_hydrated_users.add(user_id)
+    try:
+        settings = await get_user_settings(user_id)
+        if settings:
+            if settings['model_key']:
+                user_models[user_id] = settings['model_key']
+            if settings['voice_mode']:
+                user_voice_mode[user_id] = settings['voice_mode']
+    except Exception:
+        logger.exception(f"Could not load saved settings from DB for user_id={user_id}")
 
 
 def available_models_for(user_id):
@@ -492,6 +514,10 @@ async def _apply_model_choice(user_id, selected_key) -> str:
     if selected_key in TRUSTED_MODELS and not is_trusted(user_id):
         return "This model is only available to trusted users.\nTry flash25lite - it's free and unrestricted."
     user_models[user_id] = selected_key
+    try:
+        await set_user_model(user_id, selected_key)
+    except Exception:
+        logger.exception(f"Failed to persist model choice for user_id={user_id}")
     return f"Model switched to:\n{ALL_MODELS[selected_key][0]}"
 
 
@@ -908,6 +934,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data in ("voice:text", "voice:voice"):
         user_voice_mode[user_id] = 'voice' if data == "voice:voice" else 'text'
+        try:
+            await set_user_voice_mode(user_id, user_voice_mode[user_id])
+        except Exception:
+            logger.exception(f"Failed to persist voice mode for user_id={user_id}")
         await query.edit_message_text(
             "How should I reply to voice messages?",
             reply_markup=voice_menu_markup(user_id)

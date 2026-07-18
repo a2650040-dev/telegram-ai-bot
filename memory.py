@@ -42,6 +42,11 @@ async def init_db():
                 updated_at TIMESTAMPTZ DEFAULT now()
             );
         """)
+        # Added later: per-user settings that used to live only in RAM.
+        # ADD COLUMN IF NOT EXISTS is safe to re-run on every startup, so
+        # this also upgrades any user_profile table created before this.
+        await conn.execute("ALTER TABLE user_profile ADD COLUMN IF NOT EXISTS model_key TEXT;")
+        await conn.execute("ALTER TABLE user_profile ADD COLUMN IF NOT EXISTS voice_mode TEXT;")
     logger.info("Memory DB ready (messages, user_profile)")
 
 
@@ -94,6 +99,43 @@ async def get_profile(user_id: int):
         return await conn.fetchrow(
             "SELECT summary, message_count FROM user_profile WHERE user_id = $1",
             user_id,
+        )
+
+
+async def get_user_settings(user_id: int):
+    """Returns a row with model_key and voice_mode (either may be None if
+    the user never set them), or None if the user has no profile row yet."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT model_key, voice_mode FROM user_profile WHERE user_id = $1",
+            user_id,
+        )
+
+
+async def set_user_model(user_id: int, model_key: str):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO user_profile (user_id, model_key)
+            VALUES ($1, $2)
+            ON CONFLICT (user_id) DO UPDATE SET model_key = $2
+            """,
+            user_id, model_key,
+        )
+
+
+async def set_user_voice_mode(user_id: int, voice_mode: str):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO user_profile (user_id, voice_mode)
+            VALUES ($1, $2)
+            ON CONFLICT (user_id) DO UPDATE SET voice_mode = $2
+            """,
+            user_id, voice_mode,
         )
 
 
