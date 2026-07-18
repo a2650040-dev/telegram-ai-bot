@@ -208,8 +208,12 @@ def _prune(timestamps, window):
         timestamps.pop(0)
 
 
+ADMIN_IDS = {8634926425}  # <-- сюда свой Telegram user_id
+
 def check_chat_rate_limit(user_id) -> str | None:
     """Returns an error message if the user is rate-limited, else None."""
+    if user_id in ADMIN_IDS:
+        return None
     now = time()
     ts = chat_timestamps[user_id]
     _prune(ts, DAY)
