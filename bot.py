@@ -37,6 +37,7 @@ logging.basicConfig(
     stream=sys.stdout
 )
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 gemini_client = genai.Client(api_key=os.getenv('GEMINI_API_KEY'))
 
