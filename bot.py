@@ -26,7 +26,7 @@ from memory import (
     init_db, save_message, get_recent_history,
     get_profile, maybe_refresh_summary, clear_history,
     get_user_settings, set_user_model, set_user_voice_mode,
-    delete_user_data,
+    delete_user_data, delete_last_messages,
 )
 
 load_dotenv()
@@ -37,7 +37,6 @@ logging.basicConfig(
     stream=sys.stdout
 )
 logger = logging.getLogger(__name__)
-logging.getLogger("httpx").setLevel(logging.WARNING)
 
 gemini_client = genai.Client(api_key=os.getenv('GEMINI_API_KEY'))
 
@@ -209,12 +208,8 @@ def _prune(timestamps, window):
         timestamps.pop(0)
 
 
-ADMIN_IDS = {8634926425}  # <-- сюда свой Telegram user_id
-
 def check_chat_rate_limit(user_id) -> str | None:
     """Returns an error message if the user is rate-limited, else None."""
-    if user_id in ADMIN_IDS:
-        return None
     now = time()
     ts = chat_timestamps[user_id]
     _prune(ts, DAY)
@@ -385,6 +380,7 @@ def main_menu_markup():
             InlineKeyboardButton("🖼 Images", callback_data="nav:image"),
             InlineKeyboardButton("🧹 Clear history", callback_data="nav:clear"),
         ],
+        [InlineKeyboardButton("↩️ Undo last exchange", callback_data="nav:undo")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -445,6 +441,7 @@ HELP_TEXT = (
     "/setmodel <name> - switch model by typing\n"
     "/image <description> - generate an image (add --anime --art --dark --minimal --photo)\n"
     "/clear - clear conversation history\n"
+    "/undo - remove the last exchange (recovery from a bad reply)\n"
     "/privacy - what I remember about you, and how to delete it\n"
     "/welcome - show this message"
 )
@@ -474,6 +471,7 @@ BOT_COMMANDS = [
     ("setmodel", "🤖 Models"),
     ("image", "🎨 Image"),
     ("clear", "🧹 Clear history"),
+    ("undo", "↩️ Undo last exchange"),
     ("privacy", "🔒 Privacy"),
     ("forget_me", "🗑️ Forget me"),
 ]
@@ -562,6 +560,23 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         logger.exception(f"Failed to clear DB history for user_id={user_id}")
     await update.message.reply_text("History cleared!")
+
+
+@restricted
+async def undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Removes the last exchange (your message + the bot's reply) from
+    memory - both the in-process cache and Postgres. Recovery tool for a
+    broken/blocked turn, without wiping the whole conversation like /clear."""
+    user_id = update.message.from_user.id
+    if user_id in user_histories and user_histories[user_id]:
+        user_histories[user_id] = user_histories[user_id][:-2]
+    try:
+        await delete_last_messages(user_id, count=2)
+    except Exception:
+        logger.exception(f"Failed to delete last messages for user_id={user_id}")
+        await update.message.reply_text("Something went wrong removing the last message - please try again.")
+        return
+    await update.message.reply_text("Removed the last exchange from memory.")
 
 
 @restricted
@@ -810,6 +825,19 @@ async def run_chat_turn(user_id, model_key, content, max_attempts=3):
                 reply_text = response.text
                 stored_user_text = content
 
+            if not reply_text:
+                # Gemini returned no text at all - usually a safety/content
+                # block. Bail out here, BEFORE touching user_histories or
+                # the DB: session.get_history() at this point would contain
+                # an empty/broken turn that poisons every future request for
+                # this user (Gemini rejects a history with an empty content
+                # entry), which is exactly the "Error reaching Gemini" loop
+                # this was causing. Nothing gets saved, history stays as it
+                # was before this turn, and the user gets a clear message
+                # instead of a literal "None".
+                logger.warning(f"Gemini returned no text for user_id={user_id} (likely blocked) - not touching history")
+                return "Sorry, I can't respond to that - it looks like it was blocked by a content filter. Try rephrasing."
+
             if is_audio:
                 # Swap the raw audio-in / raw-JSON-out turn for clean text
                 # equivalents, so future turns don't keep re-sending audio
@@ -1012,6 +1040,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.exception(f"Failed to clear DB history for user_id={user_id}")
         await query.edit_message_text("History cleared!", reply_markup=InlineKeyboardMarkup([back_button()]))
 
+    elif data == "nav:undo":
+        if user_id in user_histories and user_histories[user_id]:
+            user_histories[user_id] = user_histories[user_id][:-2]
+        try:
+            await delete_last_messages(user_id, count=2)
+            await query.edit_message_text("Removed the last exchange from memory.", reply_markup=InlineKeyboardMarkup([back_button()]))
+        except Exception:
+            logger.exception(f"Failed to delete last messages for user_id={user_id}")
+            await query.edit_message_text("Something went wrong removing the last message.", reply_markup=InlineKeyboardMarkup([back_button()]))
+
 
 # ── App wiring ────────────────────────────────────────────────────────
 
@@ -1026,6 +1064,7 @@ def main():
     app.add_handler(CommandHandler("menu", menu))
     app.add_handler(CommandHandler("welcome", help_command))
     app.add_handler(CommandHandler("clear", clear))
+    app.add_handler(CommandHandler("undo", undo))
     app.add_handler(CommandHandler("privacy", privacy_command))
     app.add_handler(CommandHandler("forget_me", forget_me))
     app.add_handler(CommandHandler("stats", stats_command))
