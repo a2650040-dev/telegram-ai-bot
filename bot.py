@@ -37,6 +37,7 @@ logging.basicConfig(
     stream=sys.stdout
 )
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 gemini_client = genai.Client(api_key=os.getenv('GEMINI_API_KEY'))
 
@@ -208,8 +209,12 @@ def _prune(timestamps, window):
         timestamps.pop(0)
 
 
+ADMIN_IDS = {8634926425}  # <-- сюда свой Telegram user_id
+
 def check_chat_rate_limit(user_id) -> str | None:
     """Returns an error message if the user is rate-limited, else None."""
+    if user_id in ADMIN_IDS:
+        return None
     now = time()
     ts = chat_timestamps[user_id]
     _prune(ts, DAY)
