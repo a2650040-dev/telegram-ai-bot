@@ -102,23 +102,23 @@ def restricted(handler):
 
 
 # ── Models ────────────────────────────────────────────────────────────────
-# Gemini 2.0 Flash / 2.0 Flash-Lite were shut down by Google on June 1, 2026
-# and are removed here. Current free-tier lineup as of mid-2026:
+# Free-tier lineup as of October 2026 (ai.google.dev/gemini-api/docs/pricing).
+# Gemini 2.x models are legacy: Google only keeps them for existing users.
+# Flash-Lite has a much bigger free daily quota than Flash, so it is the default.
 
 PUBLIC_MODELS = {
-    'flash25lite': ('gemini-2.5-flash-lite', 'Flash-Lite 2.5'),
-    'flash25':     ('gemini-2.5-flash', 'Flash 2.5'),
+    'flash35lite': ('gemini-3.5-flash-lite', 'Flash-Lite 3.5'),
+    'flash31lite': ('gemini-3.1-flash-lite', 'Flash-Lite 3.1'),
 }
 
 TRUSTED_MODELS = {
-    'flash3preview':    ('gemini-3-flash-preview', 'Flash 3 (Preview)'),
-    'flash31litepreview': ('gemini-3.1-flash-lite', 'Flash-Lite 3.1 (Preview)'),
-    'pro25':            ('gemini-2.5-pro', 'Pro 2.5'),
+    'flash38': ('gemini-3.8-flash', 'Flash 3.8'),
+    'flash36': ('gemini-3.6-flash', 'Flash 3.6'),
 }
 
 ALL_MODELS = {**PUBLIC_MODELS, **TRUSTED_MODELS}
-DEFAULT_MODEL = 'flash25'
-TTS_MODEL = 'gemini-2.5-flash-preview-tts'
+DEFAULT_MODEL = 'flash35lite'
+TTS_MODEL = 'gemini-3.8-flash-lite-tts'
 TTS_VOICE = 'Kore'
 
 user_histories = {}
@@ -537,7 +537,7 @@ async def _apply_model_choice(user_id, selected_key) -> str:
     if selected_key not in ALL_MODELS:
         return "Unknown model."
     if selected_key in TRUSTED_MODELS and not is_trusted(user_id):
-        return "This model is only available to trusted users.\nTry flash25lite - it's free and unrestricted."
+        return "This model is only available to trusted users.\nTry flash35lite - it's free and unrestricted."
     user_models[user_id] = selected_key
     try:
         await set_user_model(user_id, selected_key)

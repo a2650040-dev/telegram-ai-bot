@@ -175,7 +175,7 @@ async def update_summary(user_id: int, new_summary: str):
         )
 
 
-async def maybe_refresh_summary(user_id: int, gemini_client, model_name: str = "gemini-2.5-flash"):
+async def maybe_refresh_summary(user_id: int, gemini_client, model_name: str = "gemini-3.5-flash-lite"):
     """Every 20 messages, asks Gemini to distill a compact, durable profile
     from recent history - keeps memory useful without growing forever."""
     profile = await get_profile(user_id)
