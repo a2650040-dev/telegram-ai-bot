@@ -5,3 +5,4 @@ python-dotenv
 httpx==0.28.1
 pydub
 asyncpg
+tzdata
