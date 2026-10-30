@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Persistent memory for the bot: recent conversation history + a long-term
-user profile, stored in Postgres (Railway addon). This is what makes
-memory survive deploys/restarts instead of living only in RAM.
+Persistent memory for the bot: conversation history (kept separately for
+every role) + a long-term user profile shared by all roles, stored in
+Postgres (Railway addon). This is what makes memory survive
+deploys/restarts instead of living only in RAM.
 """
 import os
 import logging
@@ -10,6 +11,10 @@ import logging
 import asyncpg
 
 logger = logging.getLogger(__name__)
+
+# Role that old messages (written before roles existed) belong to.
+# Must match DEFAULT_ROLE in roles.py.
+DEFAULT_ROLE_KEY = 'default'
 
 _pool = None
 
@@ -48,15 +53,26 @@ async def init_db():
         await conn.execute("ALTER TABLE user_profile ADD COLUMN IF NOT EXISTS model_key TEXT;")
         await conn.execute("ALTER TABLE user_profile ADD COLUMN IF NOT EXISTS voice_mode TEXT;")
         await conn.execute("ALTER TABLE user_profile ADD COLUMN IF NOT EXISTS search_mode TEXT;")
+        # Roles: the role the user is currently talking to (NULL = default),
+        # and which role every stored message belongs to. Rows that existed
+        # before this migration automatically get role_key = 'default', so the
+        # whole old history becomes the history of the default role.
+        await conn.execute("ALTER TABLE user_profile ADD COLUMN IF NOT EXISTS role_key TEXT;")
+        await conn.execute(
+            f"ALTER TABLE messages ADD COLUMN IF NOT EXISTS role_key TEXT NOT NULL DEFAULT '{DEFAULT_ROLE_KEY}';"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS messages_user_role_id_idx ON messages (user_id, role_key, id);"
+        )
     logger.info("Memory DB ready (messages, user_profile)")
 
 
-async def save_message(user_id: int, role: str, content: str):
+async def save_message(user_id: int, role: str, content: str, role_key: str = DEFAULT_ROLE_KEY):
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO messages (user_id, role, content) VALUES ($1, $2, $3)",
-            user_id, role, content,
+            "INSERT INTO messages (user_id, role, content, role_key) VALUES ($1, $2, $3, $4)",
+            user_id, role, content, role_key,
         )
         await conn.execute(
             """
@@ -69,33 +85,49 @@ async def save_message(user_id: int, role: str, content: str):
         )
 
 
-async def get_recent_history(user_id: int, limit: int = 20):
-    """Returns rows (role, content) in chronological order."""
+async def get_recent_history(user_id: int, limit: int = 20, role_key: str | None = None):
+    """Returns rows (role, content) in chronological order. With role_key,
+    only that role's conversation; with role_key=None, all roles together
+    (used only to refresh the shared profile)."""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT role, content FROM messages
-            WHERE user_id = $1
-            ORDER BY created_at DESC
-            LIMIT $2
-            """,
-            user_id, limit,
-        )
+        if role_key is None:
+            rows = await conn.fetch(
+                """
+                SELECT role, content FROM messages
+                WHERE user_id = $1
+                ORDER BY id DESC
+                LIMIT $2
+                """,
+                user_id, limit,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT role, content FROM messages
+                WHERE user_id = $1 AND role_key = $2
+                ORDER BY id DESC
+                LIMIT $3
+                """,
+                user_id, role_key, limit,
+            )
         return list(reversed(rows))
 
 
-async def clear_history(user_id: int):
-    """Wipes recent conversation history. Deliberately does NOT touch the
-    long-term profile - /clear is about the current conversation, not
-    about the bot forgetting who the user is."""
+async def clear_history(user_id: int, role_key: str):
+    """Wipes the conversation history of ONE role. Deliberately does NOT touch
+    other roles' history or the long-term profile - /clear is about the
+    current conversation, not about the bot forgetting who the user is."""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM messages WHERE user_id = $1", user_id)
+        await conn.execute(
+            "DELETE FROM messages WHERE user_id = $1 AND role_key = $2",
+            user_id, role_key,
+        )
 
 
-async def delete_last_messages(user_id: int, count: int = 2):
-    """Deletes the most recent `count` message rows for a user - used by
+async def delete_last_messages(user_id: int, count: int = 2, role_key: str = DEFAULT_ROLE_KEY):
+    """Deletes the most recent `count` message rows of one role - used by
     /undo to recover from a broken/blocked turn without wiping the whole
     history like /clear does."""
     pool = await get_pool()
@@ -103,18 +135,18 @@ async def delete_last_messages(user_id: int, count: int = 2):
         await conn.execute(
             """
             DELETE FROM messages WHERE id IN (
-                SELECT id FROM messages WHERE user_id = $1
-                ORDER BY created_at DESC LIMIT $2
+                SELECT id FROM messages WHERE user_id = $1 AND role_key = $2
+                ORDER BY id DESC LIMIT $3
             )
             """,
-            user_id, count,
+            user_id, role_key, count,
         )
 
 
 async def delete_user_data(user_id: int):
-    """Full wipe: history, profile summary, and saved settings - everything
-    Postgres knows about this user. Used by /forget_me, unlike /clear which
-    only touches conversation history."""
+    """Full wipe: history of ALL roles, profile summary, and saved settings -
+    everything Postgres knows about this user. Used by /forget_me, unlike
+    /clear which only touches one role's conversation history."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM messages WHERE user_id = $1", user_id)
@@ -131,12 +163,13 @@ async def get_profile(user_id: int):
 
 
 async def get_user_settings(user_id: int):
-    """Returns a row with model_key, voice_mode and search_mode (any may be
-    None if the user never set them), or None if the user has no profile row yet."""
+    """Returns a row with model_key, voice_mode, search_mode and role_key (any
+    may be None if the user never set them), or None if the user has no
+    profile row yet."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         return await conn.fetchrow(
-            "SELECT model_key, voice_mode, search_mode FROM user_profile WHERE user_id = $1",
+            "SELECT model_key, voice_mode, search_mode, role_key FROM user_profile WHERE user_id = $1",
             user_id,
         )
 
@@ -181,6 +214,20 @@ async def set_user_search_mode(user_id: int, search_mode: str):
         )
 
 
+async def set_user_role(user_id: int, role_key: str):
+    """Remembers which role the user is talking to, so it survives restarts."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO user_profile (user_id, role_key)
+            VALUES ($1, $2)
+            ON CONFLICT (user_id) DO UPDATE SET role_key = $2
+            """,
+            user_id, role_key,
+        )
+
+
 async def update_summary(user_id: int, new_summary: str):
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -192,7 +239,9 @@ async def update_summary(user_id: int, new_summary: str):
 
 async def maybe_refresh_summary(user_id: int, gemini_client, model_name: str = "gemini-3.5-flash-lite"):
     """Every 20 messages, asks Gemini to distill a compact, durable profile
-    from recent history - keeps memory useful without growing forever."""
+    from recent history - keeps memory useful without growing forever.
+    The profile is shared by all roles, so it is built from the recent
+    messages of all roles together."""
     profile = await get_profile(user_id)
     if not profile or profile["message_count"] == 0 or profile["message_count"] % 20 != 0:
         return
@@ -203,13 +252,15 @@ async def maybe_refresh_summary(user_id: int, gemini_client, model_name: str = "
     prompt = f"""Current profile notes about this user:
 {profile['summary'] or '(empty)'}
 
-Recent conversation:
+Recent conversation (the user may be talking to different assistant
+personas, and the assistant's lines may be written in character):
 {convo_text}
 
-Update the profile: short bullet points, only durable facts (name,
-interests, communication style, preferences). Do not include one-off
-details specific to this conversation. Reply with only the updated
-profile text, no preamble."""
+Update the profile: short bullet points, only durable facts the USER told
+about themselves (name, interests, communication style, preferences).
+Never record anything a persona said, invented or implied about itself or
+about the user. Do not include one-off details specific to this
+conversation. Reply with only the updated profile text, no preamble."""
 
     try:
         response = gemini_client.models.generate_content(model=model_name, contents=prompt)

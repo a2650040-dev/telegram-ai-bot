@@ -29,7 +29,9 @@ from memory import (
     get_profile, maybe_refresh_summary, clear_history,
     get_user_settings, set_user_model, set_user_voice_mode,
     delete_user_data, delete_last_messages, set_user_search_mode,
+    set_user_role,
 )
+from roles import ROLES, DEFAULT_ROLE, find_role_key
 
 load_dotenv()
 
@@ -151,8 +153,10 @@ def current_datetime_note() -> str:
     now = datetime.now(tz)
     return f"Current date and time: {now.strftime('%A, %d %B %Y, %H:%M')} ({tz_name})."
 
+# Conversation history is kept per (user_id, role_key): every role has its own.
 user_histories = {}
 user_models = {}
+user_roles = {}               # user_id -> role key the user is talking to (default role if missing)
 user_voice_mode = {}          # user_id -> 'text' (default) or 'voice'
 user_search = {}              # user_id -> True when Google Search is switched on
 user_pending_image_style = {}  # user_id -> style suffix waiting for a description
@@ -161,9 +165,10 @@ _settings_hydrated_users = set()  # user_ids we've already tried to load setting
 
 
 async def _ensure_user_settings_hydrated(user_id):
-    """Loads model_key/voice_mode from Postgres into the in-memory dicts,
-    once per user per process. Everything after this keeps reading/writing
-    the plain dicts as before - this just stops them resetting on deploy."""
+    """Loads model_key/voice_mode/search_mode/role_key from Postgres into the
+    in-memory dicts, once per user per process. Everything after this keeps
+    reading/writing the plain dicts as before - this just stops them
+    resetting on deploy."""
     if user_id in _settings_hydrated_users:
         return
     _settings_hydrated_users.add(user_id)
@@ -176,6 +181,8 @@ async def _ensure_user_settings_hydrated(user_id):
                 user_voice_mode[user_id] = settings['voice_mode']
             if settings['search_mode']:
                 user_search[user_id] = (settings['search_mode'] == 'on')
+            if settings['role_key']:
+                user_roles[user_id] = settings['role_key']
     except Exception:
         logger.exception(f"Could not load saved settings from DB for user_id={user_id}")
 
@@ -196,6 +203,17 @@ def get_user_model_key(user_id):
 
 def get_user_model_name(user_id):
     return ALL_MODELS[get_user_model_key(user_id)][0]
+
+
+def get_user_role_key(user_id):
+    """The role the user is talking to. Falls back to the default role if the
+    saved role no longer exists (e.g. its prompt file was removed)."""
+    key = user_roles.get(user_id, DEFAULT_ROLE)
+    return key if key in ROLES else DEFAULT_ROLE
+
+
+def role_label(role_key):
+    return ROLES.get(role_key, ROLES[DEFAULT_ROLE])['label']
 
 
 STYLES = {
@@ -402,7 +420,16 @@ def synthesize_speech(text: str) -> tuple[bytes, int]:
 
 def strip_trailer(text: str) -> str:
     """Removes the footer (sources, search note, '🤖 Model: ...') before sending text to TTS."""
-    return re.sub(r'\n*(?:🔎 Sources:|ℹ\ufe0f? Google Search|🤖 Model:).*$', '', text, flags=re.DOTALL).strip()
+    return re.sub(r'\n*(?:🔎 Sources:|ℹ️? Google Search|🤖 Model:).*$', '', text, flags=re.DOTALL).strip()
+
+
+def model_footer_line(model_key, role_key) -> str:
+    """'🤖 Model: gemini-... · 🧭 Орион' (the role part only for non-default roles).
+    strip_trailer() removes the whole line before text goes to TTS."""
+    line = f"🤖 Model: {ALL_MODELS[model_key][0]}"
+    if role_key != DEFAULT_ROLE:
+        line += f" · {role_label(role_key)}"
+    return line
 
 
 # ── Inline keyboards ─────────────────────────────────────────────────────
@@ -410,6 +437,7 @@ def strip_trailer(text: str) -> str:
 def main_menu_markup():
     keyboard = [
         [InlineKeyboardButton("ℹ️ Help", callback_data="nav:help")],
+        [InlineKeyboardButton("🎭 Roles", callback_data="nav:roles")],
         [
             InlineKeyboardButton("🤖 Models", callback_data="nav:models"),
             InlineKeyboardButton("🎙 Voice", callback_data="nav:voice"),
@@ -434,6 +462,29 @@ def models_menu_markup(user_id):
     for key, (_, label) in available_models_for(user_id).items():
         prefix = "✅ " if key == current else ""
         rows.append([InlineKeyboardButton(f"{prefix}{label}", callback_data=f"model:{key}")])
+    rows.append(back_button())
+    return InlineKeyboardMarkup(rows)
+
+
+def roles_menu_text(user_id, notice='') -> str:
+    current = get_user_role_key(user_id)
+    lines = []
+    if notice:
+        lines += [notice, ""]
+    lines.append("🎭 Roles - every role keeps its own conversation history; your profile is shared.")
+    lines.append("")
+    for key, role in ROLES.items():
+        marker = " (current)" if key == current else ""
+        lines.append(f"{role['label']} - {role['description']}{marker}")
+    return "\n".join(lines)
+
+
+def roles_menu_markup(user_id):
+    current = get_user_role_key(user_id)
+    rows = []
+    for key, role in ROLES.items():
+        prefix = "✅ " if key == current else ""
+        rows.append([InlineKeyboardButton(f"{prefix}{role['label']}", callback_data=f"role:{key}")])
     rows.append(back_button())
     return InlineKeyboardMarkup(rows)
 
@@ -491,6 +542,7 @@ HELP_TEXT = (
     "🤗 Welcome! I'm an AI assistant powered by Gemini.\n\n"
     "What I can do:\n"
     "• Chat - just type a message\n"
+    "• Roles - talk to a character instead of the plain bot (mentor, reading partner, psychologist, English teacher and more); each role remembers its own conversation. Switch with /role or /menu → 🎭 Roles\n"
     "• Voice - send a voice message, I can reply in text or voice (see /menu → 🎙 Voice)\n"
     "• Images - generate pictures with /image or /menu → 🖼 Images\n"
     "• Photos & PDFs - send a photo or a PDF; add a caption to ask a question about it\n"
@@ -498,12 +550,13 @@ HELP_TEXT = (
     "• Multiple models - switch anytime with /setmodel or /menu → 🤖 Models\n\n"
     "Commands:\n"
     "/menu - main menu with buttons\n"
+    "/role [name] - choose a role (no name shows the list)\n"
     "/models - list available models\n"
     "/model - current model\n"
     "/setmodel <name> - switch model by typing\n"
     "/image <description> - generate an image (add --anime --art --dark --minimal --photo)\n"
     "/search - turn Google Search on or off\n"
-    "/clear - clear conversation history\n"
+    "/clear - clear the conversation history of the current role\n"
     "/undo - remove the last exchange (recovery from a bad reply)\n"
     "/privacy - what I remember about you, and how to delete it\n"
     "/welcome - show this message"
@@ -511,17 +564,17 @@ HELP_TEXT = (
 
 PRIVACY_TEXT = (
     "What I remember:\n"
-    "• Your recent conversation history (used so I have context between messages)\n"
+    "• Your recent conversation history - kept separately for each role (used so I have context between messages)\n"
     "• A short profile summary I build up over time (name, interests, style - "
-    "so I don't start from zero every conversation)\n"
-    "• Your chosen model and voice-reply setting\n\n"
+    "so I don't start from zero every conversation). It is shared by all roles.\n"
+    "• Your chosen model, role and voice-reply setting\n\n"
     "For voice messages, I store a text transcript of what you said, not the audio itself. "
     "For photos and PDFs, I store a short note (e.g. \"[photo] your caption\") and my reply, "
     "not the file itself. Photos and PDFs you send are passed to Google's Gemini to be read.\n\n"
     "This is stored in a database so it survives restarts - it isn't shared with other users, "
     "and only the bot owner has access to the underlying database.\n\n"
-    "/clear wipes your conversation history only (keeps your profile and settings).\n"
-    "/forget_me wipes everything I have about you - history, profile, and settings, all at once."
+    "/clear wipes the conversation history of the current role only (keeps other roles, your profile and settings).\n"
+    "/forget_me wipes everything I have about you - history of all roles, profile, and settings, all at once."
 )
 
 START_TEXT = (
@@ -532,6 +585,7 @@ START_TEXT = (
 BOT_COMMANDS = [
     ("welcome", "🤗 Welcome!"),
     ("menu", "📋 Main menu"),
+    ("role", "🎭 Roles"),
     ("model", "🤖 Show current model"),
     ("setmodel", "🤖 Models"),
     ("image", "🎨 Image"),
@@ -617,15 +671,57 @@ async def set_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(result)
 
 
+async def _apply_role_choice(user_id, selected_key) -> str:
+    """Shared by /role and the button menu. Switching a role never touches any
+    history: every role keeps its own, and coming back continues where it stopped."""
+    if selected_key not in ROLES:
+        return "Unknown role."
+    user_roles[user_id] = selected_key
+    try:
+        await set_user_role(user_id, selected_key)
+    except Exception:
+        logger.exception(f"Failed to persist role choice for user_id={user_id}")
+    role = ROLES[selected_key]
+    return f"Role: {role['label']} - {role['description']}"
+
+
+@restricted
+async def role_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/role -> list, /role Орион (or orion, or обычный бот) -> switch."""
+    user_id = update.message.from_user.id
+    if not context.args:
+        await update.message.reply_text(roles_menu_text(user_id), reply_markup=roles_menu_markup(user_id))
+        return
+    selected_key = find_role_key(' '.join(context.args))
+    if selected_key is None:
+        await update.message.reply_text(
+            roles_menu_text(user_id, notice="Unknown role. Pick one:"),
+            reply_markup=roles_menu_markup(user_id),
+        )
+        return
+    await update.message.reply_text(await _apply_role_choice(user_id, selected_key))
+
+
 @restricted
 async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clears the conversation of the CURRENT role only."""
     user_id = update.message.from_user.id
-    user_histories[user_id] = []
+    role_key = get_user_role_key(user_id)
+    user_histories[(user_id, role_key)] = []
     try:
-        await clear_history(user_id)
+        await clear_history(user_id, role_key)
     except Exception:
-        logger.exception(f"Failed to clear DB history for user_id={user_id}")
-    await update.message.reply_text("History cleared!")
+        logger.exception(f"Failed to clear DB history for user_id={user_id}, role={role_key}")
+    await update.message.reply_text(f"History cleared ({role_label(role_key)})!")
+
+
+async def _undo_last_exchange(user_id) -> None:
+    """Removes the last exchange of the current role from the cache and from Postgres."""
+    role_key = get_user_role_key(user_id)
+    history_key = (user_id, role_key)
+    if user_histories.get(history_key):
+        user_histories[history_key] = user_histories[history_key][:-2]
+    await delete_last_messages(user_id, count=2, role_key=role_key)
 
 
 @restricted
@@ -634,10 +730,8 @@ async def undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     memory - both the in-process cache and Postgres. Recovery tool for a
     broken/blocked turn, without wiping the whole conversation like /clear."""
     user_id = update.message.from_user.id
-    if user_id in user_histories and user_histories[user_id]:
-        user_histories[user_id] = user_histories[user_id][:-2]
     try:
-        await delete_last_messages(user_id, count=2)
+        await _undo_last_exchange(user_id)
     except Exception:
         logger.exception(f"Failed to delete last messages for user_id={user_id}")
         await update.message.reply_text("Something went wrong removing the last message - please try again.")
@@ -656,8 +750,10 @@ async def forget_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Clear everything in the in-process caches too, not just the DB -
     # otherwise the old model/voice-mode/history would keep answering
     # from RAM until the next restart even though the DB is clean.
-    user_histories.pop(user_id, None)
+    for history_key in [k for k in user_histories if k[0] == user_id]:
+        del user_histories[history_key]
     user_models.pop(user_id, None)
+    user_roles.pop(user_id, None)
     user_voice_mode.pop(user_id, None)
     user_search.pop(user_id, None)
     _settings_hydrated_users.discard(user_id)
@@ -668,7 +764,7 @@ async def forget_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Something went wrong clearing your data - please try again.")
         return
     await update.message.reply_text(
-        "Done - I've deleted your conversation history, profile, and settings. "
+        "Done - I've deleted your conversation history (all roles), profile, and settings. "
         "Next message will start completely fresh."
     )
 
@@ -812,6 +908,12 @@ LANGUAGE_INSTRUCTION = (
     "use whichever language dominates it."
 )
 
+# Added only when a role is active: some roles prescribe their own language
+# (e.g. the English teacher explains in Russian and practises in English).
+ROLE_LANGUAGE_NOTE = (
+    "If the role description above says which language to use, follow the role description."
+)
+
 AUDIO_INSTRUCTION = (
     "The user's message is a voice recording. Respond only to the words they "
     "actually spoke. If the recording is too short, silent, or too unclear to "
@@ -855,10 +957,11 @@ def _parse_voice_turn(raw_text: str):
     return None
 
 
-async def _hydrate_history(user_id):
+async def _hydrate_history(user_id, role_key):
     """Cold start (fresh process after a deploy/restart): rebuild this
-    user's Gemini chat history from Postgres instead of starting empty."""
-    rows = await get_recent_history(user_id, limit=20)
+    user's Gemini chat history for one role from Postgres instead of
+    starting empty."""
+    rows = await get_recent_history(user_id, limit=20, role_key=role_key)
     return [
         types.Content(role=row['role'], parts=[types.Part.from_text(text=row['content'])])
         for row in rows
@@ -866,13 +969,15 @@ async def _hydrate_history(user_id):
 
 
 async def run_chat_turn(user_id, model_key, content, max_attempts=3,
-                        media_label=None, use_search=False):
+                        media_label=None, use_search=False, role_key=DEFAULT_ROLE):
     """Runs one conversation turn and returns (reply_text, footer).
 
     content: a string, or a list of genai Parts (voice, or photo/PDF + question).
     media_label: set for photo/PDF turns - the short text note stored in memory
     instead of the file itself (e.g. "[photo] what is this?").
     use_search: turn on Google Search grounding (text and photo/PDF turns only).
+    role_key: which role is talking. The role's prompt goes into the system
+    instruction, and the turn is read from / saved to that role's own history.
     footer: extra text to show under the reply ("" normally; the list of web
     sources when search was used, or a note when search had to be skipped).
 
@@ -887,12 +992,16 @@ async def run_chat_turn(user_id, model_key, content, max_attempts=3,
     has to process either way. If Gemini fails to return valid JSON (rare),
     we retry once with a plain-text request instead of ever showing the
     user a raw/truncated JSON fragment."""
-    if user_id not in user_histories:
+    if role_key not in ROLES:
+        role_key = DEFAULT_ROLE
+    history_key = (user_id, role_key)
+
+    if history_key not in user_histories:
         try:
-            user_histories[user_id] = await _hydrate_history(user_id)
+            user_histories[history_key] = await _hydrate_history(user_id, role_key)
         except Exception:
-            logger.exception(f"Could not load history from DB for user_id={user_id}, starting empty")
-            user_histories[user_id] = []
+            logger.exception(f"Could not load history from DB for user_id={user_id}, role={role_key}, starting empty")
+            user_histories[history_key] = []
 
     model_name = ALL_MODELS[model_key][0]
     is_media = media_label is not None
@@ -905,8 +1014,13 @@ async def run_chat_turn(user_id, model_key, content, max_attempts=3,
         profile = None
     profile_note = f" What you know about this user: {profile['summary']}" if profile and profile['summary'] else ""
 
+    role_prompt = ROLES[role_key]['prompt']
+    role_block = f"{role_prompt}\n\n" if role_prompt else ""
+    language_rules = LANGUAGE_INSTRUCTION + (f" {ROLE_LANGUAGE_NOTE}" if role_prompt else "")
+
     base_system_instruction = (
-        LANGUAGE_INSTRUCTION
+        role_block
+        + language_rules
         + f" {current_datetime_note()}"
         + profile_note
         + (f" {AUDIO_INSTRUCTION}" if is_audio else "")
@@ -930,7 +1044,7 @@ async def run_chat_turn(user_id, model_key, content, max_attempts=3,
         try:
             session = gemini_client.chats.create(
                 model=model_name,
-                history=user_histories[user_id],
+                history=user_histories[history_key],
                 config=types.GenerateContentConfig(**config_kwargs),
             )
             response = session.send_message(content)
@@ -943,7 +1057,7 @@ async def run_chat_turn(user_id, model_key, content, max_attempts=3,
                     logger.warning(f"Voice turn: invalid JSON from Gemini for user_id={user_id}, retrying without schema")
                     plain_session = gemini_client.chats.create(
                         model=model_name,
-                        history=user_histories[user_id],
+                        history=user_histories[history_key],
                         config=types.GenerateContentConfig(system_instruction=base_system_instruction),
                     )
                     plain_response = plain_session.send_message(content)
@@ -979,13 +1093,13 @@ async def run_chat_turn(user_id, model_key, content, max_attempts=3,
                 base_history = raw_history[:-2] if len(raw_history) >= 2 else []
                 base_history.append(types.Content(role='user', parts=[types.Part.from_text(text=stored_user_text)]))
                 base_history.append(types.Content(role='model', parts=[types.Part.from_text(text=reply_text)]))
-                user_histories[user_id] = base_history[-20:]
+                user_histories[history_key] = base_history[-20:]
             else:
-                user_histories[user_id] = session.get_history()[-20:]
+                user_histories[history_key] = session.get_history()[-20:]
 
             try:
-                await save_message(user_id, "user", stored_user_text)
-                await save_message(user_id, "model", reply_text)
+                await save_message(user_id, "user", stored_user_text, role_key)
+                await save_message(user_id, "model", reply_text, role_key)
                 await maybe_refresh_summary(user_id, gemini_client)
             except Exception:
                 logger.exception(f"Failed to persist memory for user_id={user_id} (reply still sent normally)")
@@ -1065,15 +1179,17 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         model_key = get_user_model_key(user_id)
+        role_key = get_user_role_key(user_id)
         reply_text, footer = await run_chat_turn(
             user_id, model_key, user_message,
             use_search=wants_search(user_id, user_message),
+            role_key=role_key,
         )
         record_chat_request(user_id, model_key)
 
         await waiting_msg.delete()
 
-        full_response = f"{reply_text}{footer}\n\n🤖 Model: {ALL_MODELS[model_key][0]}"
+        full_response = f"{reply_text}{footer}\n\n{model_footer_line(model_key, role_key)}"
         await send_reply_chunks(update.message, full_response)
 
     except genai_errors.ServerError:
@@ -1104,7 +1220,8 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         audio_part = types.Part.from_bytes(data=voice_bytes, mime_type='audio/ogg')
 
         model_key = get_user_model_key(user_id)
-        reply_text, footer = await run_chat_turn(user_id, model_key, [audio_part])
+        role_key = get_user_role_key(user_id)
+        reply_text, footer = await run_chat_turn(user_id, model_key, [audio_part], role_key=role_key)
         record_chat_request(user_id, model_key)
         record_voice_request()
 
@@ -1122,7 +1239,7 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await waiting_msg.delete()
-            full_response = f"{reply_text}{footer}\n\n🤖 Model: {ALL_MODELS[model_key][0]}"
+            full_response = f"{reply_text}{footer}\n\n{model_footer_line(model_key, role_key)}"
             await send_reply_chunks(update.message, full_response)
 
     except genai_errors.ServerError:
@@ -1188,15 +1305,17 @@ async def media_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         media_label = f"{kind_label} {caption}".strip()
 
         model_key = get_user_model_key(user_id)
+        role_key = get_user_role_key(user_id)
         reply_text, footer = await run_chat_turn(
             user_id, model_key, [media_part, prompt_text],
             media_label=media_label,
             use_search=wants_search(user_id, caption),
+            role_key=role_key,
         )
         record_chat_request(user_id, model_key)
 
         await waiting_msg.delete()
-        full_response = f"{reply_text}{footer}\n\n🤖 Model: {ALL_MODELS[model_key][0]}"
+        full_response = f"{reply_text}{footer}\n\n{model_footer_line(model_key, role_key)}"
         await send_reply_chunks(message, full_response)
 
     except genai_errors.ServerError:
@@ -1208,6 +1327,16 @@ async def media_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ── Callback query (button) handler ──────────────────────────────────────
+
+async def _edit_menu_message(query, text, reply_markup):
+    """edit_message_text, but a tap that changes nothing (e.g. choosing the role
+    that is already selected) makes Telegram answer 'message is not modified' -
+    that is not an error worth failing the handler for."""
+    try:
+        await query.edit_message_text(text, reply_markup=reply_markup)
+    except Exception as e:
+        logger.info(f"Menu message not edited: {e}")
+
 
 @restricted
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1241,6 +1370,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "nav:help":
         await query.edit_message_text(HELP_TEXT, reply_markup=InlineKeyboardMarkup([back_button()]))
+
+    elif data == "nav:roles":
+        await _edit_menu_message(query, roles_menu_text(user_id), roles_menu_markup(user_id))
+
+    elif data.startswith("role:"):
+        selected_key = data.split(":", 1)[1]
+        result = await _apply_role_choice(user_id, selected_key)
+        await _edit_menu_message(query, roles_menu_text(user_id, notice=result), roles_menu_markup(user_id))
 
     elif data == "nav:models":
         await query.edit_message_text("Choose a model:", reply_markup=models_menu_markup(user_id))
@@ -1287,18 +1424,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(search_status_text(user_id), reply_markup=search_menu_markup(user_id))
 
     elif data == "nav:clear":
-        user_histories[user_id] = []
+        role_key = get_user_role_key(user_id)
+        user_histories[(user_id, role_key)] = []
         try:
-            await clear_history(user_id)
+            await clear_history(user_id, role_key)
         except Exception:
-            logger.exception(f"Failed to clear DB history for user_id={user_id}")
-        await query.edit_message_text("History cleared!", reply_markup=InlineKeyboardMarkup([back_button()]))
+            logger.exception(f"Failed to clear DB history for user_id={user_id}, role={role_key}")
+        await query.edit_message_text(f"History cleared ({role_label(role_key)})!", reply_markup=InlineKeyboardMarkup([back_button()]))
 
     elif data == "nav:undo":
-        if user_id in user_histories and user_histories[user_id]:
-            user_histories[user_id] = user_histories[user_id][:-2]
         try:
-            await delete_last_messages(user_id, count=2)
+            await _undo_last_exchange(user_id)
             await query.edit_message_text("Removed the last exchange from memory.", reply_markup=InlineKeyboardMarkup([back_button()]))
         except Exception:
             logger.exception(f"Failed to delete last messages for user_id={user_id}")
@@ -1326,6 +1462,7 @@ def main():
     app.add_handler(CommandHandler("models", models))
     app.add_handler(CommandHandler("model", current_model))
     app.add_handler(CommandHandler("setmodel", set_model))
+    app.add_handler(CommandHandler("role", role_command))
 
     app.add_handler(CommandHandler("image", image))
     app.add_handler(CommandHandler("search", search_command))
