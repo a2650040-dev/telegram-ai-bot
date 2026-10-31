@@ -35,6 +35,11 @@ from memory import (
     NOTE_MAX,
 )
 from roles import ROLES, DEFAULT_ROLE, find_role_key
+from providers import (
+    VENICE_MODELS, VENICE_IMAGE_MODELS, VENICE_VIDEO_MODELS,
+    venice_enabled, venice_chat, venice_image, venice_video_generate,
+    video_max_usd, ProviderError,
+)
 
 load_dotenv()
 
@@ -123,6 +128,11 @@ TRUSTED_MODELS = {
     'flash36': ('gemini-3.6-flash', 'Flash 3.6'),
 }
 
+# Venice models (Claude, DeepSeek, uncensored ...) appear only when VENICE_API_KEY is set,
+# and only for trusted users: they are paid per use from the owner's Venice balance.
+if venice_enabled():
+    TRUSTED_MODELS.update(VENICE_MODELS)
+
 ALL_MODELS = {**PUBLIC_MODELS, **TRUSTED_MODELS}
 DEFAULT_MODEL = 'flash35lite'
 TTS_MODEL = 'gemini-3.8-flash-lite-tts'
@@ -189,6 +199,8 @@ user_roles = {}               # user_id -> role key the user is talking to (defa
 user_voice_mode = {}          # user_id -> 'text' (default) or 'voice'
 user_search = {}              # user_id -> True when Google Search is switched on
 user_pending_image_style = {}  # user_id -> style suffix waiting for a description
+user_image_engine = {}          # user_id -> 'pollinations' or a VENICE_IMAGE_MODELS key (in memory, resets on restart)
+user_video_model = {}           # user_id -> VENICE_VIDEO_MODELS key
 user_memory_index = {}        # user_id -> items shown by the last /memory (for /forget <number>)
 
 _settings_hydrated_users = set()  # user_ids we've already tried to load settings for this run
@@ -221,6 +233,23 @@ def available_models_for(user_id):
     if is_trusted(user_id):
         return ALL_MODELS
     return PUBLIC_MODELS
+
+
+def venice_media_allowed(user_id) -> bool:
+    """Venice images/videos are paid per use: trusted users only, and only with a key."""
+    return venice_enabled() and is_trusted(user_id)
+
+
+def get_image_engine(user_id) -> str:
+    key = user_image_engine.get(user_id, 'pollinations')
+    if key in VENICE_IMAGE_MODELS and venice_media_allowed(user_id):
+        return key
+    return 'pollinations'
+
+
+def get_video_model_key(user_id) -> str:
+    key = user_video_model.get(user_id)
+    return key if key in VENICE_VIDEO_MODELS else next(iter(VENICE_VIDEO_MODELS))
 
 
 def get_user_model_key(user_id):
@@ -266,6 +295,7 @@ LEGACY_STYLE_FLAGS = {
 CHAT_HOUR_LIMIT = 20
 CHAT_DAY_LIMIT = 70
 IMAGE_DAY_LIMIT = 10
+VIDEO_DAY_LIMIT = 3          # videos cost real money (Venice balance)
 GLOBAL_DAY_LIMIT = 400
 
 HOUR = 3600
@@ -273,11 +303,13 @@ DAY = 86400
 
 chat_timestamps = defaultdict(list)     # user_id -> [timestamps]
 image_timestamps = defaultdict(list)    # user_id -> [timestamps]
+video_timestamps = defaultdict(list)    # user_id -> [timestamps]
 global_timestamps = []                  # all requests bot-wide
 
 STATS = {
     'chat_total': 0,
     'image_total': 0,
+    'video_total': 0,
     'voice_total': 0,
     'by_user': Counter(),
     'by_model': Counter(),
@@ -314,6 +346,14 @@ def check_image_rate_limit(user_id) -> str | None:
     return None
 
 
+def check_video_rate_limit(user_id) -> str | None:
+    ts = video_timestamps[user_id]
+    _prune(ts, DAY)
+    if len(ts) >= VIDEO_DAY_LIMIT:
+        return f"Daily video limit reached ({VIDEO_DAY_LIMIT}). Try again tomorrow!"
+    return None
+
+
 def check_global_rate_limit() -> str | None:
     _prune(global_timestamps, DAY)
     if len(global_timestamps) >= GLOBAL_DAY_LIMIT:
@@ -335,6 +375,14 @@ def record_image_request(user_id):
     image_timestamps[user_id].append(now)
     global_timestamps.append(now)
     STATS['image_total'] += 1
+    STATS['by_user'][user_id] += 1
+
+
+def record_video_request(user_id):
+    now = time()
+    video_timestamps[user_id].append(now)
+    global_timestamps.append(now)
+    STATS['video_total'] += 1
     STATS['by_user'][user_id] += 1
 
 
@@ -554,7 +602,7 @@ def search_menu_markup(user_id):
     return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data="search:toggle")], back_button()])
 
 
-def image_menu_markup():
+def image_menu_markup(user_id=None):
     rows = []
     row = []
     for key, (label, _) in STYLES.items():
@@ -564,7 +612,31 @@ def image_menu_markup():
             row = []
     if row:
         rows.append(row)
+    if user_id is not None and venice_media_allowed(user_id):
+        rows.append([InlineKeyboardButton("🧠 Image model", callback_data="nav:imgmodel"),
+                     InlineKeyboardButton("🎬 Video model", callback_data="nav:vidmodel")])
     rows.append(back_button())
+    return InlineKeyboardMarkup(rows)
+
+
+def image_engine_markup(user_id):
+    current = get_image_engine(user_id)
+    rows = [[InlineKeyboardButton(("✅ " if current == 'pollinations' else "") + "Pollinations (free)",
+                                  callback_data="imgmodel:pollinations")]]
+    for key, (_, label) in VENICE_IMAGE_MODELS.items():
+        rows.append([InlineKeyboardButton(("✅ " if key == current else "") + f"Venice: {label}",
+                                          callback_data=f"imgmodel:{key}")])
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="nav:image")])
+    return InlineKeyboardMarkup(rows)
+
+
+def video_model_markup(user_id):
+    current = get_video_model_key(user_id)
+    rows = []
+    for key, info in VENICE_VIDEO_MODELS.items():
+        rows.append([InlineKeyboardButton(("✅ " if key == current else "") + info['label'],
+                                          callback_data=f"vidmodel:{key}")])
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="nav:image")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -574,10 +646,11 @@ HELP_TEXT = (
     "• Chat - just type a message\n"
     "• Roles - talk to a character instead of the plain bot (mentor, reading partner, psychologist, English teacher, music guide and more); each role has its own conversation and its own memory of you. Switch with /role or /menu → 🎭 Roles\n"
     "• Voice - send a voice message, I can reply in text or voice (see /menu → 🎙 Voice)\n"
-    "• Images - generate pictures with /image or /menu → 🖼 Images\n"
+    "• Images - generate pictures with /image or /menu → 🖼 Images. Trusted users can pick Venice image models there\n"
+    "• Video - trusted users: /video <description> (reply to a photo to animate it); pick the model with /videomodel\n"
     "• Photos & PDFs - send a photo or a PDF; add a caption to ask a question about it\n"
     "• Web search - just ask (e.g. \"поищи в интернете ...\" / \"search the web for ...\"), or keep Google Search on for every message with /search\n"
-    "• Multiple models - switch anytime with /setmodel or /menu → 🤖 Models\n\n"
+    "• Multiple models - switch anytime with /setmodel or /menu → 🤖 Models. Trusted users also get Venice models (Claude, DeepSeek, uncensored); photos, files and voice are always read by Gemini\n\n"
     "Commands:\n"
     "/menu - main menu with buttons\n"
     "/role [name] - choose a role (no name shows the list)\n"
@@ -585,6 +658,8 @@ HELP_TEXT = (
     "/model - current model\n"
     "/setmodel <name> - switch model by typing\n"
     "/image <description> - generate an image (add --anime --art --dark --minimal --photo)\n"
+    "/video <description> - make a short video (trusted users, Venice; reply to a photo to animate it)\n"
+    "/imagemodel, /videomodel - choose the image / video model\n"
     "/search - turn Google Search on or off\n"
     "/memory - what I remember in the current role (notes, journal, open items)\n"
     "/remember <text> - add a note for this role (/remember all <text> - for every role)\n"
@@ -606,6 +681,7 @@ PRIVACY_TEXT = (
     "For voice messages, I store a text transcript of what you said, not the audio itself. "
     "For photos and PDFs, I store a short note (e.g. \"[photo] your caption\") and my reply, "
     "not the file itself. Photos and PDFs you send are passed to Google's Gemini to be read.\n\n"
+    "Messages go to Google's Gemini by default. If you pick a Venice model (trusted users only), or make a Venice image or video, the text of your messages, the role prompt, your profile and the role memory are sent to Venice instead of Google for those replies.\n\n"
     "This is stored in a database so it survives restarts - it isn't shared with other users, "
     "and only the bot owner has access to the underlying database.\n\n"
     "/clear wipes the conversation history of the current role only (the role's memory, other roles, your profile and settings stay).\n"
@@ -628,6 +704,7 @@ BOT_COMMANDS = [
     ("model", "🤖 Show current model"),
     ("setmodel", "🤖 Models"),
     ("image", "🎨 Image"),
+    ("video", "🎬 Video"),
     ("search", "🔎 Google Search on/off"),
     ("clear", "🧹 Clear history"),
     ("undo", "↩️ Undo last exchange"),
@@ -919,6 +996,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 Stats since last restart:\n\n"
         f"Chat messages: {STATS['chat_total']}\n"
         f"Images generated: {STATS['image_total']}\n"
+        f"Videos generated: {STATS['video_total']}\n"
         f"Voice messages handled: {STATS['voice_total']}\n"
         f"Unique users: {len(STATS['by_user'])}\n"
         f"Top models: {top_models}"
@@ -978,6 +1056,24 @@ async def generate_and_send_image(update: Update, context: ContextTypes.DEFAULT_
         return
 
     prompt = f"{description}, {style_suffix}" if style_suffix else description
+
+    engine = get_image_engine(user_id)
+    if engine != 'pollinations':
+        venice_id, venice_label = VENICE_IMAGE_MODELS[engine]
+        msg = await update.effective_message.reply_text(f"Generating image with {venice_label}, please wait...")
+        try:
+            photo_bytes = await venice_image(venice_id, prompt)
+            await update.effective_message.reply_photo(photo=io.BytesIO(photo_bytes), caption=description[:1000])
+            await msg.delete()
+            record_image_request(user_id)
+        except ProviderError as e:
+            logger.warning(f"Venice image error: {e}")
+            await msg.edit_text(e.user_message)
+        except Exception:
+            logger.exception("Venice image error")
+            await msg.edit_text("Something went wrong generating the image. Please try again.")
+        return
+
     msg = await update.effective_message.reply_text("Generating image, please wait ~20 seconds...")
 
     import urllib.parse
@@ -1025,7 +1121,7 @@ async def image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "Pick a style, then type what to draw:",
-            reply_markup=image_menu_markup()
+            reply_markup=image_menu_markup(update.effective_user.id)
         )
         return
 
@@ -1038,6 +1134,96 @@ async def image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             break
 
     await generate_and_send_image(update, context, full_text, style_suffix)
+
+
+# ── Video (Venice) ───────────────────────────────────────────────────────
+
+@restricted
+async def video_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    message = update.effective_message
+    if not venice_media_allowed(user_id):
+        await message.reply_text("Video generation is available to trusted users only.")
+        return
+    description = ' '.join(context.args).strip() if context.args else ''
+    if not description:
+        await message.reply_text(
+            "Write what the video should show: /video a cat walking on the moon\n"
+            "To animate a photo, reply to the photo with /video and a description of the motion.\n"
+            "Choose the model with /videomodel. A 5-second video costs real money, so there is a daily limit "
+            f"({VIDEO_DAY_LIMIT} videos).")
+        return
+
+    limit_msg = check_global_rate_limit() or check_video_rate_limit(user_id)
+    if limit_msg:
+        await message.reply_text(limit_msg)
+        return
+
+    info = VENICE_VIDEO_MODELS[get_video_model_key(user_id)]
+    image_data_url = None
+    reply = message.reply_to_message
+    if reply and (reply.photo or (reply.document and (reply.document.mime_type or '').startswith('image/'))):
+        tg_obj = reply.photo[-1] if reply.photo else reply.document
+        if tg_obj.file_size and tg_obj.file_size > MAX_MEDIA_BYTES:
+            await message.reply_text(f"That picture is too large (max {MAX_MEDIA_BYTES // (1024 * 1024)} MB).")
+            return
+        try:
+            tg_file = await tg_obj.get_file()
+            raw = bytes(await tg_file.download_as_bytearray())
+        except Exception:
+            logger.exception("Video: couldn't download the source picture")
+            await message.reply_text("Couldn't download that picture. Please try again.")
+            return
+        mime = 'image/jpeg' if reply.photo else (reply.document.mime_type or 'image/jpeg')
+        import base64 as _b64
+        image_data_url = f"data:{mime};base64,{_b64.b64encode(raw).decode()}"
+
+    model_id = info['i2v'] if image_data_url else info['t2v']
+    status_msg = await message.reply_text("🎬 Checking the price...")
+
+    async def on_status(text):
+        try:
+            await status_msg.edit_text(text)
+        except Exception:
+            pass
+
+    try:
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.UPLOAD_VIDEO)
+        video_bytes, price = await venice_video_generate(
+            model_id, description, image_data_url=image_data_url,
+            max_usd=video_max_usd(), on_status=on_status)
+        record_video_request(user_id)
+        await message.reply_video(video=io.BytesIO(video_bytes),
+                                  caption=f"{description[:900]}\n\n🎬 {info['label']} · ${price:.2f}",
+                                  supports_streaming=True)
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+    except ProviderError as e:
+        logger.warning(f"Venice video error: {e}")
+        await on_status(e.user_message)
+    except Exception:
+        logger.exception("Video error")
+        await on_status("Something went wrong making the video. Please try again.")
+
+
+@restricted
+async def imagemodel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not venice_media_allowed(user_id):
+        await update.message.reply_text("Only the free Pollinations image model is available to you.")
+        return
+    await update.message.reply_text("Choose the image model:", reply_markup=image_engine_markup(user_id))
+
+
+@restricted
+async def videomodel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not venice_media_allowed(user_id):
+        await update.message.reply_text("Video generation is available to trusted users only.")
+        return
+    await update.message.reply_text("Choose the video model:", reply_markup=video_model_markup(user_id))
 
 
 # ── Chat (text) ────────────────────────────────────────────────────────
@@ -1127,6 +1313,35 @@ def schedule_memory_update(user_id, role_key):
     task.add_done_callback(_background_tasks.discard)
 
 
+async def _venice_turn(user_id, model_key, text, system_instruction, history_key, role_key, use_search):
+    """One text turn through a Venice model. The conversation history is the same
+    one the Gemini models use (so you can switch models mid-conversation); the
+    turn is saved to memory exactly like a Gemini turn. Returns (reply_text, footer)."""
+    messages = [{"role": "system", "content": system_instruction}]
+    for entry in user_histories[history_key]:
+        entry_text = ''.join((p.text or '') for p in entry.parts)
+        if entry_text:
+            messages.append({"role": "assistant" if entry.role == 'model' else "user", "content": entry_text})
+    messages.append({"role": "user", "content": text})
+
+    reply_text = await venice_chat(VENICE_MODELS[model_key][0], messages, use_search=use_search)
+    if not reply_text:
+        logger.warning(f"Venice model {model_key} returned no text for user_id={user_id} - not touching history")
+        return "The model returned an empty reply. Please try again or pick another model with /setmodel.", ""
+
+    user_histories[history_key] = _trim_history(user_histories[history_key] + [
+        types.Content(role='user', parts=[types.Part.from_text(text=text)]),
+        types.Content(role='model', parts=[types.Part.from_text(text=reply_text)]),
+    ])
+    try:
+        await save_message(user_id, "user", text, role_key)
+        await save_message(user_id, "model", reply_text, role_key)
+        schedule_memory_update(user_id, role_key)
+    except Exception:
+        logger.exception(f"Failed to persist memory for user_id={user_id} (reply still sent normally)")
+    return reply_text, ""
+
+
 async def run_chat_turn(user_id, model_key, content, max_attempts=3,
                         media_label=None, use_search=False, role_key=DEFAULT_ROLE):
     """Runs one conversation turn and returns (reply_text, footer).
@@ -1162,6 +1377,9 @@ async def run_chat_turn(user_id, model_key, content, max_attempts=3,
             logger.exception(f"Could not load history from DB for user_id={user_id}, role={role_key}, starting empty")
             user_histories[history_key] = []
 
+    if model_key in VENICE_MODELS and not isinstance(content, str):
+        model_key = DEFAULT_MODEL   # photos, files and voice are read by Gemini only
+
     model_name = ALL_MODELS[model_key][0]
     is_media = media_label is not None
     is_audio = isinstance(content, list) and not is_media
@@ -1192,6 +1410,10 @@ async def run_chat_turn(user_id, model_key, content, max_attempts=3,
         + (f"\n\n{memory_block}\n\n" if memory_block else "")
         + (f" {AUDIO_INSTRUCTION}" if is_audio else "")
     )
+    if model_key in VENICE_MODELS:
+        return await _venice_turn(user_id, model_key, content, base_system_instruction,
+                                  history_key, role_key, use_search)
+
     json_system_instruction = base_system_instruction + (f" {VOICE_JSON_INSTRUCTION}" if is_audio else "")
 
     config_kwargs = {"system_instruction": json_system_instruction}
@@ -1359,6 +1581,9 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         full_response = f"{reply_text}{footer}\n\n{model_footer_line(model_key, role_key)}"
         await send_reply_chunks(update.message, full_response)
 
+    except ProviderError as e:
+        logger.warning(f"Chat error - provider: {e}")
+        await waiting_msg.edit_text(e.user_message)
     except genai_errors.ServerError:
         logger.exception("Chat error - Gemini overloaded")
         await waiting_msg.edit_text("Google's servers are overloaded right now. Please try again in a minute.")
@@ -1388,6 +1613,8 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         model_key = get_user_model_key(user_id)
         role_key = get_user_role_key(user_id)
+        if model_key in VENICE_MODELS:
+            model_key = DEFAULT_MODEL   # only Gemini understands voice
         reply_text, footer = await run_chat_turn(user_id, model_key, [audio_part], role_key=role_key)
         record_chat_request(user_id, model_key)
         record_voice_request()
@@ -1473,6 +1700,11 @@ async def media_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         model_key = get_user_model_key(user_id)
         role_key = get_user_role_key(user_id)
+        if model_key in VENICE_MODELS:
+            model_key = DEFAULT_MODEL   # only Gemini reads photos and PDFs
+            footer_note = "\n\nℹ️ Photos and files are read by Gemini; text messages still go to your chosen model."
+        else:
+            footer_note = ""
         reply_text, footer = await run_chat_turn(
             user_id, model_key, [media_part, prompt_text],
             media_label=media_label,
@@ -1482,7 +1714,7 @@ async def media_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         record_chat_request(user_id, model_key)
 
         await waiting_msg.delete()
-        full_response = f"{reply_text}{footer}\n\n{model_footer_line(model_key, role_key)}"
+        full_response = f"{reply_text}{footer}{footer_note}\n\n{model_footer_line(model_key, role_key)}"
         await send_reply_chunks(message, full_response)
 
     except genai_errors.ServerError:
@@ -1574,7 +1806,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "nav:image":
         await query.edit_message_text(
             "Pick a style, then type what to draw:",
-            reply_markup=image_menu_markup()
+            reply_markup=image_menu_markup(user_id)
         )
 
     elif data.startswith("image:"):
@@ -1582,6 +1814,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_pending_image_style[user_id] = style_key
         label = STYLES[style_key][0]
         await query.edit_message_text(f"Style selected: {label}\n\nNow type what you'd like to draw.")
+
+    elif data == "nav:imgmodel" and venice_media_allowed(user_id):
+        await query.edit_message_text("Choose the image model:", reply_markup=image_engine_markup(user_id))
+
+    elif data.startswith("imgmodel:") and venice_media_allowed(user_id):
+        choice = data.split(":", 1)[1]
+        if choice == 'pollinations' or choice in VENICE_IMAGE_MODELS:
+            user_image_engine[user_id] = choice
+        await _edit_menu_message(query, "Choose the image model:", image_engine_markup(user_id))
+
+    elif data == "nav:vidmodel" and venice_media_allowed(user_id):
+        await query.edit_message_text("Choose the video model:", reply_markup=video_model_markup(user_id))
+
+    elif data.startswith("vidmodel:") and venice_media_allowed(user_id):
+        choice = data.split(":", 1)[1]
+        if choice in VENICE_VIDEO_MODELS:
+            user_video_model[user_id] = choice
+        await _edit_menu_message(query, "Choose the video model:", video_model_markup(user_id))
 
     elif data == "nav:search":
         await query.edit_message_text(search_status_text(user_id), reply_markup=search_menu_markup(user_id))
@@ -1635,6 +1885,9 @@ def main():
     app.add_handler(CommandHandler("remember", remember_command))
 
     app.add_handler(CommandHandler("image", image))
+    app.add_handler(CommandHandler("video", video_command))
+    app.add_handler(CommandHandler("imagemodel", imagemodel_command))
+    app.add_handler(CommandHandler("videomodel", videomodel_command))
     app.add_handler(CommandHandler("search", search_command))
 
     app.add_handler(CallbackQueryHandler(button_callback))

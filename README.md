@@ -8,16 +8,17 @@ A Telegram bot powered by Google Gemini. Multi-turn chat with persistent memory 
 
 - **AI chat** — multi-turn conversation with Gemini. The model sees the last 40 messages of the current role; history, a long-term user profile and the per-role memory are stored in Postgres, so they survive redeploys.
 - **Memory per role** — each role keeps its own memory of you, written by Gemini in the background from your own words (never from what the character said): a short memory text (facts, themes, where you stopped), a day-by-day journal (days older than a week are condensed into weeks, weeks older than five weeks into months), open items (what you planned or promised; the role asks how it went), and notes you add yourself with `/remember`. When you refer to the past ("в прошлый раз…", "помнишь…") the role gets more of the journal. See everything with `/memory`, delete with `/forget`. The shared profile is common to all roles.
-- **Roles** — besides the plain bot you can talk to a character: Орион (friend and mentor), Мартин (reading partner, Russian language and literature), Ника (smart friend in love with you), Инга (ex-wife, blunt), Ирина (psychologist), Эмма (English teacher), Ян (music guide). Choose with `/role` or `/menu` → Roles. **Every role has its own conversation history** (switch and come back, the role continues where it stopped); the user profile is shared by all roles. `/clear` clears only the current role. The role prompts are plain text files in the `roles/` folder — edit a file to change a role. The default role is the plain bot and owns all history written before roles existed.
+- **Roles** — besides the plain bot you can talk to a character: Орион (friend and mentor), Мартин (reading partner, Russian language and literature), Майя (smart friend in love with you), Лиза (ex-wife, blunt), Ирина (psychologist), Эмма (English teacher), Нэйт (music guide). Choose with `/role` or `/menu` → Roles. **Every role has its own conversation history** (switch and come back, the role continues where it stopped); the user profile is shared by all roles. `/clear` clears only the current role. The role prompts are plain text files in the `roles/` folder — edit a file to change a role. The default role is the plain bot and owns all history written before roles existed.
 - **Photos and PDFs** — send a photo, an image file (JPG, PNG, WebP, HEIC) or a PDF. A caption works as the question; without one the bot describes the image / summarizes the PDF. Max 15 MB. Only a short text note is stored in memory, not the file.
 - **Google Search** — optional grounding with Google Search. Turn it on for every message with `/search`, or just ask in chat ("поищи в интернете …", "search the web for …") to search for that one message. If search is not allowed for the API key (e.g. free tier), the bot answers without it and says so. Not used for voice messages.
 - **Date and time** — the model is told the current date/time (time zone from `BOT_TIMEZONE`, default `Asia/Yakutsk`).
 - **Voice** — voice messages are understood; replies can be text or voice (see `/menu` → Voice). A "Read aloud" button under replies reads them with Gemini TTS.
-- **Image generation** — Pollinations (`gen.pollinations.ai`), style presets.
-- **Model switching** — per-user model choice (saved in Postgres). Some models are for trusted users only.
+- **Image generation** — Pollinations (`gen.pollinations.ai`, free, default), style presets. Trusted users can switch to Venice image models (Z-Image Turbo, Anime WAI, Flux 2 Pro, GPT Image 2.5 Flare, Nano Banana 2.1) with `/imagemodel` or `/menu` → 🖼 Images → 🧠 Image model; the choice is kept in memory until the bot restarts.
+- **Video** — trusted users, Venice: `/video <description>` makes a 5-second 720p 16:9 video (LTX 2.5 Fast, Wan 2.6, Seedance 2.0 Fast, Veo 3.1 Fast; choose with `/videomodel`). Reply to a photo with `/video <motion>` to animate that photo. Before each video the bot asks Venice for the price and refuses if it is above `VENICE_VIDEO_MAX_USD` (default $1); the price is shown under the finished video. Limit: 3 videos per user per day.
+- **Model switching** — per-user model choice (saved in Postgres). Some models are for trusted users only. Besides Gemini, trusted users get four **Venice.ai** models (Claude Sonnet 5.5, DeepSeek V4.1 Flash, Venice Uncensored 1.2, Venice Role-Play) when `VENICE_API_KEY` is set. Venice models do plain text chat with roles and memory; photos, PDFs and voice are always read by Gemini, and the conversation history is shared, so you can switch models in the middle of a conversation.
 - **Markdown rendering** — custom MarkdownV2 converter with plain-text fallback.
 - **Access control** — `allowed_users.txt` lists trusted users; with `PUBLIC_MODE=true` everyone can chat but only trusted users get the higher-tier models. (Roles are available to everyone who can chat.)
-- **Rate limits** (in memory, reset on restart) — 20 chat messages per hour and 70 per day per user, 10 images per day per user, 400 requests per day for the whole bot.
+- **Rate limits** (in memory, reset on restart) — 20 chat messages per hour and 70 per day per user, 10 images and 3 videos per day per user, 400 requests per day for the whole bot.
 
 ---
 
@@ -31,6 +32,9 @@ A Telegram bot powered by Google Gemini. Multi-turn chat with persistent memory 
 | `/welcome` | Welcome / help text |
 | `/role [name]` | Choose a role (no argument shows the list; `/role Орион`, `/role обычный бот`) |
 | `/image [description]` | Generate an image (legacy flags: `--photo --anime --art --dark --minimal`) |
+| `/imagemodel` | Choose the image model: Pollinations or Venice (trusted users) |
+| `/video <description>` | Make a short video with Venice (trusted users); reply to a photo to animate it |
+| `/videomodel` | Choose the video model (trusted users) |
 | `/model`, `/models`, `/setmodel [name]` | Show / list / switch model |
 | `/search [on\|off]` | Turn Google Search on or off (no argument toggles) |
 | `/memory` | Show what the bot remembers in the current role: notes, journal, open items (numbered) |
@@ -77,6 +81,8 @@ DATABASE_URL=postgres://...
 ADMIN_USER_ID=your_telegram_user_id
 PUBLIC_MODE=false
 BOT_TIMEZONE=Asia/Yakutsk
+VENICE_API_KEY=your_venice_key   # optional, enables the Venice text, image and video models for trusted users
+VENICE_VIDEO_MAX_USD=1.0         # optional, the bot refuses a video whose price is above this
 ```
 
 - **Telegram token** — [@BotFather](https://t.me/BotFather)
@@ -86,6 +92,7 @@ BOT_TIMEZONE=Asia/Yakutsk
 - `ADMIN_USER_ID` — your Telegram ID, enables `/stats`
 - `PUBLIC_MODE` — `true` lets anyone talk to the bot
 - `BOT_TIMEZONE` — optional, an IANA name such as `Europe/Berlin`; default `Asia/Yakutsk`
+- `VENICE_API_KEY` — optional; an Inference API key from the Venice account (API settings). Set it only in Railway → Variables, never in the code or in a chat. Venice API use is pay-per-use from the Venice balance (the Pro subscription gives only a small bundled credit), so give the key a monthly limit
 
 ### 3. Trusted users
 
@@ -108,7 +115,7 @@ python bot.py
 
 ## Roles
 
-Each role is one text file in `roles/` (`orion.md`, `martin.md`, `nika.md`, `inga.md`, `irina.md`, `emma.md`, `yan.md`). The list of roles (key, menu label, one-line description, file) is `_ROLE_DEFS` in `roles.py`. To change a role, edit its `.md` file and redeploy. To add a role, put a new `.md` file into `roles/` and add one line to `_ROLE_DEFS`. If a role's file is missing or empty, that role is skipped (a warning is logged) and the bot still starts.
+Each role is one text file in `roles/` (`orion.md`, `martin.md`, `maya.md`, `lizzy.md`, `irina.md`, `emma.md`, `nathan.md`). The list of roles (key, menu label, one-line description, file) is `_ROLE_DEFS` in `roles.py`. To change a role, edit its `.md` file and redeploy. To add a role, put a new `.md` file into `roles/` and add one line to `_ROLE_DEFS`. If a role's file is missing or empty, that role is skipped (a warning is logged) and the bot still starts.
 
 How memory works with roles:
 
@@ -157,6 +164,19 @@ Railway deploys on every push to `master`. After changing variables in Railway, 
 
 Text-to-speech uses `gemini-3.8-flash-lite-tts`. Gemini 2.x models were removed (legacy on the Gemini API).
 
+Venice text models (trusted users, need `VENICE_API_KEY`; prices per million tokens input/output, as of October 2026):
+
+| Alias | Venice model | Price |
+|---|---|---|
+| `vn_claude` | `claude-sonnet-5-5` | $2 / $10 |
+| `vn_deepseek` | `deepseek-v4-1-flash` | $0.30 / $1.20 |
+| `vn_uncensored` | `venice-uncensored-1-2` | $0.20 / $0.90 |
+| `vn_roleplay` | `venice-uncensored-role-play` | $0.50 / $2 |
+
+Venice image models (`VENICE_IMAGE_MODELS`, price per 1K image): `z-image-turbo` $0.01, `wai-Illustrious` $0.01, `flux-2-pro` $0.03, `gpt-image-2-5-flare` $0.07, `nano-banana-2-1` $0.10. Venice video models (`VENICE_VIDEO_MODELS`, price comes from the Video Quote API): LTX 2.5 Fast, Wan 2.6, Seedance 2.0 Fast, Veo 3.1 Fast — each with a text-to-video and an image-to-video id. Venice blurs adult images by default (`moderation: auto`); the bot does not change that. Video settings (5 s, 720p, 16:9) are constants at the top of `providers.py`; not every model accepts every setting, in which case Venice answers with an error that the bot shows.
+
+The text model list is `VENICE_MODELS` in `providers.py` (docs.venice.ai/overview/models lists all ~140 models; to add one, add a line there). With a Venice model, the text of your messages, the role prompt, the profile and the role memory are sent to Venice instead of Google. Memory updates (profile, role memory, journal) always use Gemini.
+
 ---
 
 ## Project Structure
@@ -166,7 +186,8 @@ telegram-ai-bot/
 ├── bot.py               # Main bot code
 ├── memory.py            # Postgres memory: history (per role), profile, role memory, journal, open items, notes
 ├── roles.py             # Loads the role prompts, role list
-├── roles/               # One .md prompt per role (orion, martin, nika, inga, irina, emma)
+├── providers.py         # Venice.ai: chat, image and video clients and model lists
+├── roles/               # One .md prompt per role (orion, martin, maya, lizzy, irina, emma, nathan)
 ├── allowed_users.txt    # Trusted Telegram user IDs
 ├── claude/              # Notes (TECH_DEBT.md) and smoke_test.py
 ├── .env                 # Secrets — not committed to git
