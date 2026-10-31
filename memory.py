@@ -79,13 +79,9 @@ def _affected(status) -> int:
 
 
 # Roles that were renamed: history and memory written under the old key move to the new one.
-# Runs on every start and is harmless when there is nothing to move. To rename a role
-# later, add a pair (old_key, new_key) here.
-ROLE_KEY_RENAMES = [
-    ('inga', 'lizzy'),
-    ('nika', 'maya'),
-    ('yan', 'nathan'),
-]
+# Runs on every start and is harmless when there is nothing to move. To rename a role,
+# add a pair (old_key, new_key) here, deploy, check, then empty the list again.
+ROLE_KEY_RENAMES = []   # done 31 Oct 2026: inga -> lizzy, nika -> maya, yan -> nathan
 
 
 async def _rename_role_key(conn, old: str, new: str):
