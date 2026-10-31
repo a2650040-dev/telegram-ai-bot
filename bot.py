@@ -30,6 +30,9 @@ from memory import (
     get_user_settings, set_user_model, set_user_voice_mode,
     delete_user_data, delete_last_messages, set_user_search_mode,
     set_user_role,
+    get_memory_block, maybe_update_role_memory, build_memory_overview,
+    delete_memory_item, clear_role_memory, clear_profile_summary, add_note,
+    NOTE_MAX,
 )
 from roles import ROLES, DEFAULT_ROLE, find_role_key
 
@@ -153,6 +156,32 @@ def current_datetime_note() -> str:
     now = datetime.now(tz)
     return f"Current date and time: {now.strftime('%A, %d %B %Y, %H:%M')} ({tz_name})."
 
+
+def current_local_date():
+    """Today's date in BOT_TIMEZONE - the 'day' the journal entries belong to."""
+    tz, _ = _resolve_timezone()
+    return datetime.now(tz).date()
+
+
+# How many messages of one role the model sees as conversation history.
+HISTORY_LIMIT = 40
+
+# When the user's message looks back at the past, the prompt gets more of the journal.
+WIDE_MEMORY_TRIGGER = re.compile(
+    r"(в прошлый раз|прошлый раз|помнишь|напомни|на прошлой неделе|на днях|раньше|давно|"
+    r"в прошлом месяце|ранее|last time|remember when|do you remember)",
+    re.IGNORECASE,
+)
+
+
+def _trim_history(history):
+    """Keeps the last HISTORY_LIMIT entries and makes sure the history starts
+    with a user turn (Gemini rejects a history that starts with a model turn)."""
+    history = list(history)[-HISTORY_LIMIT:]
+    while history and history[0].role != 'user':
+        history = history[1:]
+    return history
+
 # Conversation history is kept per (user_id, role_key): every role has its own.
 user_histories = {}
 user_models = {}
@@ -160,6 +189,7 @@ user_roles = {}               # user_id -> role key the user is talking to (defa
 user_voice_mode = {}          # user_id -> 'text' (default) or 'voice'
 user_search = {}              # user_id -> True when Google Search is switched on
 user_pending_image_style = {}  # user_id -> style suffix waiting for a description
+user_memory_index = {}        # user_id -> items shown by the last /memory (for /forget <number>)
 
 _settings_hydrated_users = set()  # user_ids we've already tried to load settings for this run
 
@@ -542,7 +572,7 @@ HELP_TEXT = (
     "🤗 Welcome! I'm an AI assistant powered by Gemini.\n\n"
     "What I can do:\n"
     "• Chat - just type a message\n"
-    "• Roles - talk to a character instead of the plain bot (mentor, reading partner, psychologist, English teacher and more); each role remembers its own conversation. Switch with /role or /menu → 🎭 Roles\n"
+    "• Roles - talk to a character instead of the plain bot (mentor, reading partner, psychologist, English teacher, music guide and more); each role has its own conversation and its own memory of you. Switch with /role or /menu → 🎭 Roles\n"
     "• Voice - send a voice message, I can reply in text or voice (see /menu → 🎙 Voice)\n"
     "• Images - generate pictures with /image or /menu → 🖼 Images\n"
     "• Photos & PDFs - send a photo or a PDF; add a caption to ask a question about it\n"
@@ -556,7 +586,10 @@ HELP_TEXT = (
     "/setmodel <name> - switch model by typing\n"
     "/image <description> - generate an image (add --anime --art --dark --minimal --photo)\n"
     "/search - turn Google Search on or off\n"
-    "/clear - clear the conversation history of the current role\n"
+    "/memory - what I remember in the current role (notes, journal, open items)\n"
+    "/remember <text> - add a note for this role (/remember all <text> - for every role)\n"
+    "/forget <number|role|profile> - delete a remembered item, this role's memory, or the shared profile\n"
+    "/clear - clear the conversation history of the current role (its memory stays)\n"
     "/undo - remove the last exchange (recovery from a bad reply)\n"
     "/privacy - what I remember about you, and how to delete it\n"
     "/welcome - show this message"
@@ -564,17 +597,20 @@ HELP_TEXT = (
 
 PRIVACY_TEXT = (
     "What I remember:\n"
-    "• Your recent conversation history - kept separately for each role (used so I have context between messages)\n"
-    "• A short profile summary I build up over time (name, interests, style - "
-    "so I don't start from zero every conversation). It is shared by all roles.\n"
+    "• Your recent conversation history - the last few hundred messages, kept separately for each role (the latest 40 are used as context)\n"
+    "• A short profile summary I build up over time (name, interests, style). It is shared by all roles.\n"
+    "• A memory for each role: short notes about the topics and facts you told me there, a day-by-day journal "
+    "(older days are condensed into weeks and months), things you planned or promised, and notes you add with /remember. "
+    "Written by the AI from your own words, in the background. /memory shows it all and /forget deletes it.\n"
     "• Your chosen model, role and voice-reply setting\n\n"
     "For voice messages, I store a text transcript of what you said, not the audio itself. "
     "For photos and PDFs, I store a short note (e.g. \"[photo] your caption\") and my reply, "
     "not the file itself. Photos and PDFs you send are passed to Google's Gemini to be read.\n\n"
     "This is stored in a database so it survives restarts - it isn't shared with other users, "
     "and only the bot owner has access to the underlying database.\n\n"
-    "/clear wipes the conversation history of the current role only (keeps other roles, your profile and settings).\n"
-    "/forget_me wipes everything I have about you - history of all roles, profile, and settings, all at once."
+    "/clear wipes the conversation history of the current role only (the role's memory, other roles, your profile and settings stay).\n"
+    "/forget <number>, /forget role, /forget profile delete parts of the memory.\n"
+    "/forget_me wipes everything I have about you - history and memory of all roles, profile, and settings, all at once."
 )
 
 START_TEXT = (
@@ -586,6 +622,9 @@ BOT_COMMANDS = [
     ("welcome", "🤗 Welcome!"),
     ("menu", "📋 Main menu"),
     ("role", "🎭 Roles"),
+    ("memory", "🧠 What I remember"),
+    ("remember", "📌 Remember a note"),
+    ("forget", "🧹 Forget an item"),
     ("model", "🤖 Show current model"),
     ("setmodel", "🤖 Models"),
     ("image", "🎨 Image"),
@@ -754,6 +793,7 @@ async def forget_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del user_histories[history_key]
     user_models.pop(user_id, None)
     user_roles.pop(user_id, None)
+    user_memory_index.pop(user_id, None)
     user_voice_mode.pop(user_id, None)
     user_search.pop(user_id, None)
     _settings_hydrated_users.discard(user_id)
@@ -767,6 +807,106 @@ async def forget_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Done - I've deleted your conversation history (all roles), profile, and settings. "
         "Next message will start completely fresh."
     )
+
+
+async def _send_long(message, text, limit=4000):
+    """Telegram messages are limited to 4096 characters."""
+    for i in range(0, len(text), limit):
+        await message.reply_text(text[i:i + limit])
+
+
+@restricted
+async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/memory: shows what the bot remembers in the current role (numbered items
+    can be removed with /forget <number>)."""
+    user_id = update.message.from_user.id
+    role_key = get_user_role_key(user_id)
+    try:
+        text, index = await build_memory_overview(user_id, role_key, role_label(role_key))
+    except Exception:
+        logger.exception(f"Failed to build memory overview for user_id={user_id}")
+        await update.message.reply_text("Couldn't read the memory right now - please try again.")
+        return
+    user_memory_index[user_id] = index
+    await _send_long(update.message, text)
+
+
+@restricted
+async def forget_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/forget <number> | role | profile. Numbers refer to the last /memory list."""
+    user_id = update.message.from_user.id
+    role_key = get_user_role_key(user_id)
+    arg = ' '.join(context.args).strip().lower() if context.args else ''
+    try:
+        if arg == 'role':
+            await clear_role_memory(user_id, role_key)
+            user_memory_index.pop(user_id, None)
+            await update.message.reply_text(
+                f"Done - memory, journal and open items of {role_label(role_key)} are wiped. "
+                "Notes you added with /remember and the conversation itself stay (see /memory, /clear)."
+            )
+        elif arg == 'profile':
+            await clear_profile_summary(user_id)
+            await update.message.reply_text("Done - the shared profile is empty now.")
+        elif arg.isdigit():
+            index = user_memory_index.get(user_id)
+            number = int(arg)
+            if not index:
+                await update.message.reply_text("Open /memory first, then use /forget with a number from that list.")
+            elif not 1 <= number <= len(index):
+                await update.message.reply_text(f"No item {number} in the last /memory list (1-{len(index)}).")
+            else:
+                deleted = await delete_memory_item(user_id, index[number - 1])
+                user_memory_index.pop(user_id, None)   # numbers shift after a deletion
+                await update.message.reply_text(
+                    "Deleted. Open /memory again to see the new list." if deleted
+                    else "That item was already gone. Open /memory again to see the current list."
+                )
+        else:
+            await update.message.reply_text(
+                "Use /memory to see what I remember, then:\n"
+                "/forget <number> - delete one item\n"
+                "/forget role - wipe this role's memory, journal and open items\n"
+                "/forget profile - empty the shared profile\n"
+                "/forget_me - delete everything about you"
+            )
+    except Exception:
+        logger.exception(f"Failed to forget for user_id={user_id}")
+        await update.message.reply_text("Something went wrong - please try again.")
+
+
+@restricted
+async def remember_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/remember <text> adds a note for the current role; /remember all <text> for every role."""
+    user_id = update.message.from_user.id
+    role_key = get_user_role_key(user_id)
+    args = list(context.args or [])
+    scope_key = role_key
+    if args and args[0].lower() in ('all', 'все'):
+        scope_key = ''
+        args = args[1:]
+    text = ' '.join(args).strip()
+    if not text:
+        await update.message.reply_text(
+            "Write what to remember, e.g. /remember I don't eat meat.\n"
+            "The note works in the current role; /remember all <text> works in every role."
+        )
+        return
+    if len(text) > NOTE_MAX:
+        await update.message.reply_text(f"Too long ({len(text)} characters, the limit is {NOTE_MAX}). Please shorten it.")
+        return
+    try:
+        note_id = await add_note(user_id, scope_key, text)
+    except Exception:
+        logger.exception(f"Failed to save note for user_id={user_id}")
+        await update.message.reply_text("Couldn't save the note - please try again.")
+        return
+    if note_id is None:
+        await update.message.reply_text("You have too many notes. Remove some with /memory and /forget <number>.")
+        return
+    user_memory_index.pop(user_id, None)
+    where = "every role" if scope_key == '' else role_label(role_key)
+    await update.message.reply_text(f"Remembered ({where}).")
 
 
 @restricted
@@ -961,11 +1101,30 @@ async def _hydrate_history(user_id, role_key):
     """Cold start (fresh process after a deploy/restart): rebuild this
     user's Gemini chat history for one role from Postgres instead of
     starting empty."""
-    rows = await get_recent_history(user_id, limit=20, role_key=role_key)
-    return [
+    rows = await get_recent_history(user_id, limit=HISTORY_LIMIT, role_key=role_key)
+    return _trim_history([
         types.Content(role=row['role'], parts=[types.Part.from_text(text=row['content'])])
         for row in rows
-    ]
+    ])
+
+
+_background_tasks = set()   # keeps references so background jobs aren't garbage-collected
+
+
+def schedule_memory_update(user_id, role_key):
+    """Refreshes the shared profile and this role's memory AFTER the reply was
+    sent, in the background, so the user never waits for it."""
+    async def job():
+        try:
+            await maybe_refresh_summary(user_id, gemini_client)
+            await maybe_update_role_memory(user_id, role_key, gemini_client,
+                                           current_local_date(), ROLES[role_key]['label'])
+        except Exception:
+            logger.exception(f"Background memory update failed for user_id={user_id}, role={role_key}")
+
+    task = asyncio.create_task(job())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 async def run_chat_turn(user_id, model_key, content, max_attempts=3,
@@ -1014,6 +1173,13 @@ async def run_chat_turn(user_id, model_key, content, max_attempts=3,
         profile = None
     profile_note = f" What you know about this user: {profile['summary']}" if profile and profile['summary'] else ""
 
+    memory_block = ""
+    try:
+        wide = isinstance(content, str) and bool(WIDE_MEMORY_TRIGGER.search(content))
+        memory_block = await get_memory_block(user_id, role_key, wide=wide)
+    except Exception:
+        logger.exception(f"Could not load role memory for user_id={user_id}, role={role_key}")
+
     role_prompt = ROLES[role_key]['prompt']
     role_block = f"{role_prompt}\n\n" if role_prompt else ""
     language_rules = LANGUAGE_INSTRUCTION + (f" {ROLE_LANGUAGE_NOTE}" if role_prompt else "")
@@ -1023,6 +1189,7 @@ async def run_chat_turn(user_id, model_key, content, max_attempts=3,
         + language_rules
         + f" {current_datetime_note()}"
         + profile_note
+        + (f"\n\n{memory_block}\n\n" if memory_block else "")
         + (f" {AUDIO_INSTRUCTION}" if is_audio else "")
     )
     json_system_instruction = base_system_instruction + (f" {VOICE_JSON_INSTRUCTION}" if is_audio else "")
@@ -1093,14 +1260,14 @@ async def run_chat_turn(user_id, model_key, content, max_attempts=3,
                 base_history = raw_history[:-2] if len(raw_history) >= 2 else []
                 base_history.append(types.Content(role='user', parts=[types.Part.from_text(text=stored_user_text)]))
                 base_history.append(types.Content(role='model', parts=[types.Part.from_text(text=reply_text)]))
-                user_histories[history_key] = base_history[-20:]
+                user_histories[history_key] = _trim_history(base_history)
             else:
-                user_histories[history_key] = session.get_history()[-20:]
+                user_histories[history_key] = _trim_history(session.get_history())
 
             try:
                 await save_message(user_id, "user", stored_user_text, role_key)
                 await save_message(user_id, "model", reply_text, role_key)
-                await maybe_refresh_summary(user_id, gemini_client)
+                schedule_memory_update(user_id, role_key)
             except Exception:
                 logger.exception(f"Failed to persist memory for user_id={user_id} (reply still sent normally)")
 
@@ -1463,6 +1630,9 @@ def main():
     app.add_handler(CommandHandler("model", current_model))
     app.add_handler(CommandHandler("setmodel", set_model))
     app.add_handler(CommandHandler("role", role_command))
+    app.add_handler(CommandHandler("memory", memory_command))
+    app.add_handler(CommandHandler("forget", forget_command))
+    app.add_handler(CommandHandler("remember", remember_command))
 
     app.add_handler(CommandHandler("image", image))
     app.add_handler(CommandHandler("search", search_command))
